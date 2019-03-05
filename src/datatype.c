@@ -927,8 +927,21 @@ static void init_struct_tail(jl_datatype_t *type, jl_value_t *jv, size_t na)
 JL_DLLEXPORT jl_value_t *jl_new_structv(jl_datatype_t *type, jl_value_t **args, uint32_t na)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
-    if (!jl_is_datatype(type) || type->layout == NULL)
+    if (!jl_is_datatype(type) || type->layout == NULL) {
+        // As a special case we're allowed to have unionalls over yakc,
+        // where each typevar is replaced by its upper bound.
+        if (jl_is_unionall(type)) {
+            jl_datatype_t *dt = jl_unwrap_unionall(type);
+            if (jl_is_yakc_type(dt)) {
+                while (jl_is_unionall(type)) {
+                    jl_tvar_t *tv = ((jl_unionall_t*)type)->var;
+                    type = jl_instantiate_unionall(type, tv->ub);
+                }
+                return jl_new_structv(type, args, na);
+            }
+        }
         jl_type_error("new", (jl_value_t*)jl_datatype_type, (jl_value_t*)type);
+    }
     if (type->ninitialized > na || na > jl_datatype_nfields(type))
         jl_error("invalid struct allocation");
     for (size_t i = 0; i < na; i++) {

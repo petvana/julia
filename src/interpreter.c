@@ -651,6 +651,39 @@ jl_value_t *NOINLINE jl_fptr_interpret_call(jl_value_t *f, jl_value_t **args, ui
     return r;
 }
 
+jl_value_t *jl_interpret_yakc(jl_yakc_t *yakc, jl_value_t **args, size_t nargs)
+{
+    jl_code_info_t *source = NULL;
+    jl_value_t *code = yakc->code;
+    if (jl_is_method(code)) {
+        source = (jl_code_info_t*)yakc->method->source;
+    }
+    else {
+        source = yakc->source;
+    }
+    jl_array_t *stmts = source->code;
+    assert(jl_typeis(stmts, jl_array_any_type));
+    interpreter_state *s;
+    unsigned nroots = jl_source_nslots(source) + jl_source_nssavalues(source) + 2;
+    JL_GC_PUSHFRAME(s, nroots);
+    jl_value_t **locals = (jl_value_t**)&s[1] + 3;
+    locals[0] = (jl_value_t*)yakc;
+    locals[1] = (jl_value_t*)stmts;
+    locals[2] = (jl_value_t*)yakc->env;
+    s->locals = locals + 2;
+    s->src = source;
+    s->module = NULL;
+    s->sparam_vals = NULL;
+    s->preevaluation = 0;
+    s->continue_at = 0;
+    s->mi = NULL;
+    for (int i = 0; i < nargs; ++i)
+        s->locals[1 + i] = args[i];
+    jl_value_t *r = eval_body(stmts, s, 0, 0);
+    JL_GC_POP();
+    return r;
+}
+
 jl_value_t *NOINLINE jl_interpret_toplevel_thunk(jl_module_t *m, jl_code_info_t *src)
 {
     interpreter_state *s;

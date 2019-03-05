@@ -785,4 +785,14 @@ Integer(x::Union{Float32, Float64}) = Int(x)
 # The internal jl_parse which will call into Core._parse if not `nothing`.
 _parse = nothing
 
+# YAKC Definition
+#=
+struct YAKC{A <: Tuple, R}
+    env::Any
+    ci::CodeInfo
+    fptr1
+    fptr
+end
+=#
+
 ccall(:jl_set_istopmod, Cvoid, (Any, Bool), Core, true)
