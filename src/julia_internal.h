@@ -1015,6 +1015,11 @@ unsigned jl_intrinsic_nargs(int f) JL_NOTSAFEPOINT;
 JL_DLLEXPORT jl_value_t *jl_bitcast(jl_value_t *ty, jl_value_t *v);
 JL_DLLEXPORT jl_value_t *jl_pointerref(jl_value_t *p, jl_value_t *i, jl_value_t *align);
 JL_DLLEXPORT jl_value_t *jl_pointerset(jl_value_t *p, jl_value_t *x, jl_value_t *align, jl_value_t *i);
+JL_DLLEXPORT jl_value_t *jl_atomics_fence(jl_value_t *order);
+JL_DLLEXPORT jl_value_t *jl_atomics_pointerref(jl_value_t *p, jl_value_t *order);
+JL_DLLEXPORT jl_value_t *jl_atomics_pointerset(jl_value_t *p, jl_value_t *x, jl_value_t *order);
+JL_DLLEXPORT jl_value_t *jl_atomics_pointercmpxchg(jl_value_t *p, jl_value_t *x, jl_value_t *expected, jl_value_t *success_order, jl_value_t *failure_order);
+JL_DLLEXPORT jl_value_t *jl_atomics_pointerop(jl_value_t *p, jl_value_t *x, jl_value_t *f, jl_value_t *order);
 JL_DLLEXPORT jl_value_t *jl_cglobal(jl_value_t *v, jl_value_t *ty);
 JL_DLLEXPORT jl_value_t *jl_cglobal_auto(jl_value_t *v);
 
@@ -1262,6 +1267,13 @@ extern jl_sym_t *coverageeffect_sym; extern jl_sym_t *escape_sym;
 extern jl_sym_t *optlevel_sym; extern jl_sym_t *compile_sym;
 extern jl_sym_t *infer_sym;
 extern jl_sym_t *atom_sym; extern jl_sym_t *statement_sym; extern jl_sym_t *all_sym;
+
+extern jl_sym_t *unordered_sym;
+extern jl_sym_t *monotonic_sym; // extern jl_sym_t *relaxed_sym;
+extern jl_sym_t *acquire_sym;
+extern jl_sym_t *release_sym;
+extern jl_sym_t *acquire_release_sym;
+extern jl_sym_t *sequentially_consistent_sym; // extern jl_sym_t *strong_sym;
 
 struct _jl_sysimg_fptrs_t;
 

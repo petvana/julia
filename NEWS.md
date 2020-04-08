@@ -49,6 +49,8 @@ Command-line option changes
 Multi-threading changes
 -----------------------
 
+* Intrinsics for atomic pointer operations are now defined for certain byte sizes.
+
 
 Build system changes
 --------------------

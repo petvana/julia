@@ -1418,6 +1418,7 @@ JL_CALLABLE(jl_f_intrinsic_call)
         jl_value_t *(*call2)(jl_value_t*, jl_value_t*);
         jl_value_t *(*call3)(jl_value_t*, jl_value_t*, jl_value_t*);
         jl_value_t *(*call4)(jl_value_t*, jl_value_t*, jl_value_t*, jl_value_t*);
+        jl_value_t *(*call5)(jl_value_t*, jl_value_t*, jl_value_t*, jl_value_t*, jl_value_t*);
     } fptr;
     fptr.fptr = runtime_fp[f];
     switch (fargs) {
@@ -1429,6 +1430,8 @@ JL_CALLABLE(jl_f_intrinsic_call)
             return fptr.call3(args[0], args[1], args[2]);
         case 4:
             return fptr.call4(args[0], args[1], args[2], args[3]);
+        case 5:
+            return fptr.call5(args[0], args[1], args[2], args[3], args[4]);
         default:
             assert(0 && "unexpected number of arguments to an intrinsic function");
     }

@@ -12,6 +12,7 @@ FunctionType *get_intr_args1(LLVMContext &C) { return FunctionType::get(T_prjlva
 FunctionType *get_intr_args2(LLVMContext &C) { return FunctionType::get(T_prjlvalue, {T_prjlvalue, T_prjlvalue}, false); }
 FunctionType *get_intr_args3(LLVMContext &C) { return FunctionType::get(T_prjlvalue, {T_prjlvalue, T_prjlvalue, T_prjlvalue}, false); }
 FunctionType *get_intr_args4(LLVMContext &C) { return FunctionType::get(T_prjlvalue, {T_prjlvalue, T_prjlvalue, T_prjlvalue, T_prjlvalue}, false); }
+FunctionType *get_intr_args5(LLVMContext &C) { return FunctionType::get(T_prjlvalue, {T_prjlvalue, T_prjlvalue, T_prjlvalue, T_prjlvalue, T_prjlvalue}, false); }
 
 static JuliaFunction *runtime_func[num_intrinsics] = {
 #define ADD_I(name, nargs) new JuliaFunction{"jl_"#name, get_intr_args##nargs, nullptr},
@@ -908,6 +909,12 @@ static jl_cgval_t emit_intrinsic(jl_codectx_t &ctx, intrinsic f, jl_value_t **ar
         return emit_pointerref(ctx, argv);
     case pointerset:
         return emit_pointerset(ctx, argv);
+    case atomics_fence:
+    case atomics_pointerref:
+    case atomics_pointerset:
+    case atomics_pointercmpxchg:
+    case atomics_pointerop:
+        return emit_runtime_call(ctx, f, argv, nargs);
     case bitcast:
         return generic_bitcast(ctx, argv);
     case trunc_int:

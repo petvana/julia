@@ -92,13 +92,19 @@
     /*  pointer access */ \
     ADD_I(pointerref, 3) \
     ADD_I(pointerset, 4) \
-    /* c interface */ \
+    /*  c interface */ \
     ADD_I(cglobal, 2) \
     ALIAS(llvmcall, llvmcall) \
-    /* object access */ \
+    /*  object access */ \
     ADD_I(arraylen, 1) \
     /*  hidden intrinsics */ \
-    ADD_HIDDEN(cglobal_auto, 1)
+    ADD_HIDDEN(cglobal_auto, 1) \
+    /*  pointer atomics */ \
+    ADD_I(atomics_fence, 1) \
+    ADD_I(atomics_pointerref, 2) \
+    ADD_I(atomics_pointerset, 3) \
+    ADD_I(atomics_pointercmpxchg, 5) \
+    ADD_I(atomics_pointerop, 4)
 
 enum intrinsic {
 #define ADD_I(func, nargs) func,
