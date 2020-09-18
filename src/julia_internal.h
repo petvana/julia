@@ -471,6 +471,7 @@ jl_value_t *jl_wrap_vararg(jl_value_t *t, jl_value_t *n);
 void jl_reinstantiate_inner_types(jl_datatype_t *t);
 jl_datatype_t *jl_lookup_cache_type_(jl_datatype_t *type);
 void jl_cache_type_(jl_datatype_t *type);
+void jl_rehash_type_cache(jl_typename_t *name);
 void jl_assign_bits(void *dest, jl_value_t *bits) JL_NOTSAFEPOINT;
 void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOTSAFEPOINT;
 jl_expr_t *jl_exprn(jl_sym_t *head, size_t n);

@@ -101,6 +101,9 @@ static int backref_table_numel;
 static arraylist_t layout_table;
 static arraylist_t builtin_typenames;
 
+// # of typenames whose caches are treated as weak references
+#define NUM_BUILTIN_TYPENAMES 9
+
 // list of (size_t pos, (void *f)(jl_value_t*)) entries
 // for the serializer to mark values in need of rework by function f
 // during deserialization later
@@ -1235,7 +1238,7 @@ static void jl_finalize_serializer(jl_serializer_state *s, arraylist_t *list)
 }
 
 
-static void jl_reinit_item(jl_value_t *v, int how)
+static void jl_reinit_item(jl_value_t *v, int how) JL_GC_DISABLED
 {
     switch (how) {
         case 1: { // rehash IdDict
@@ -1280,7 +1283,7 @@ static void jl_reinit_item(jl_value_t *v, int how)
 }
 
 
-static void jl_finalize_deserializer(jl_serializer_state *s)
+static void jl_finalize_deserializer(jl_serializer_state *s) JL_GC_DISABLED
 {
     // run reinitialization functions
     uintptr_t base = (uintptr_t)&s->s->buf[0];
@@ -1304,7 +1307,7 @@ static void jl_prune_type_cache(jl_svec_t *cache)
     for (i = 0; i < l; i++) {
         jl_value_t *ti = jl_svecref(cache, i);
         if (ti == NULL)
-            break;
+            continue;
         if (ptrhash_get(&backref_table, ti) != HT_NOTFOUND || jl_get_llvm_gv(native_functions, ti) != 0)
             jl_svecset(cache, ins++, ti);
         else if (jl_is_datatype(ti)) {
@@ -1316,6 +1319,9 @@ static void jl_prune_type_cache(jl_svec_t *cache)
     }
     if (i > ins) {
         memset(&jl_svec_data(cache)[ins], 0, (i - ins) * sizeof(jl_value_t*));
+        while (l > 0 && l/2 >= ins)
+            l = l/2;
+        jl_svec_len(cache) = l == 0 ? 1 : l;
     }
 }
 
@@ -1324,8 +1330,9 @@ static void jl_prune_type_cache(jl_svec_t *cache)
 
 static void jl_init_serializer2(int);
 static void jl_cleanup_serializer2(void);
+static void init_builtin_typenames(void);
 
-static void jl_save_system_image_to_stream(ios_t *f)
+static void jl_save_system_image_to_stream(ios_t *f) JL_GC_DISABLED
 {
     jl_gc_collect(JL_GC_FULL);
     jl_gc_collect(JL_GC_INCREMENTAL);   // sweep finalizers
@@ -1353,6 +1360,8 @@ static void jl_save_system_image_to_stream(ios_t *f)
     s.ptls = jl_get_ptls_states();
     arraylist_new(&s.relocs_list, 0);
     arraylist_new(&s.gctags_list, 0);
+    arraylist_t typecaches;
+    arraylist_new(&typecaches, 0);
 
     // empty!(Core.ARGS)
     if (jl_core_module != NULL) {
@@ -1372,19 +1381,22 @@ static void jl_save_system_image_to_stream(ios_t *f)
 
     { // step 1: record values (recursively) that need to go in the image
         size_t i;
+        // temporarily un-reference builtin type caches to make them effectively weak references
+        for (i = 0; i < builtin_typenames.len; i++) {
+            jl_typename_t *tn = (jl_typename_t*)builtin_typenames.items[i];
+            arraylist_push(&typecaches, tn->cache);
+            tn->cache = NULL;
+            arraylist_push(&typecaches, tn->linearcache);
+            tn->linearcache = NULL;
+        }
         for (i = 0; tags[i] != NULL; i++) {
             jl_value_t *tag = *tags[i];
             jl_serialize_value(&s, tag);
         }
-        for (i = 0; i < builtin_typenames.len; i++) {
-            jl_typename_t *tn = (jl_typename_t*)builtin_typenames.items[i];
-            jl_prune_type_cache(tn->cache);
-            jl_prune_type_cache(tn->linearcache);
-        }
-        for (i = 0; i < builtin_typenames.len; i++) {
-            jl_typename_t *tn = (jl_typename_t*)builtin_typenames.items[i];
-            jl_serialize_value(&s, tn->cache);
-            jl_serialize_value(&s, tn->linearcache);
+        for (i = 0; i < typecaches.len; i++) {
+            jl_svec_t *sv = (jl_svec_t*)typecaches.items[i];
+            jl_prune_type_cache(sv);
+            jl_serialize_value(&s, sv);
         }
     }
 
@@ -1437,6 +1449,13 @@ static void jl_save_system_image_to_stream(ios_t *f)
             jl_write_value(&s, tag);
         }
         jl_write_value(&s, s.ptls->root_task->tls);
+        for (i = 0; i < typecaches.len;) {
+            jl_typename_t *tn = (jl_typename_t*)builtin_typenames.items[i/2];
+            tn->cache = (jl_svec_t*)typecaches.items[i++];
+            jl_write_value(&s, tn->cache);
+            tn->linearcache = (jl_svec_t*)typecaches.items[i++];
+            jl_write_value(&s, tn->linearcache);
+        }
         write_uint32(f, jl_get_gs_ctr());
         write_uint32(f, jl_world_counter);
         write_uint32(f, jl_typeinf_world);
@@ -1449,6 +1468,7 @@ static void jl_save_system_image_to_stream(ios_t *f)
     arraylist_free(&ccallable_list);
     arraylist_free(&s.relocs_list);
     arraylist_free(&s.gctags_list);
+    arraylist_free(&typecaches);
     jl_cleanup_serializer2();
 
     jl_gc_enable(en);
@@ -1503,7 +1523,7 @@ JL_DLLEXPORT void jl_set_sysimg_so(void *handle)
     sysimg_fptrs = jl_init_processor_sysimg(handle);
 }
 
-static void jl_restore_system_image_from_stream(ios_t *f)
+static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
 {
     JL_TIMING(SYSIMG_LOAD);
     int en = jl_gc_enable(0);
@@ -1561,6 +1581,11 @@ static void jl_restore_system_image_from_stream(ios_t *f)
     s.ptls->root_task = (jl_task_t*)jl_gc_alloc(s.ptls, sizeof(jl_task_t), jl_task_type);
     memset(s.ptls->root_task, 0, sizeof(jl_task_t));
     s.ptls->root_task->tls = jl_read_value(&s);
+    arraylist_t typecaches;
+    arraylist_new(&typecaches, 0);
+    for (i = 0; i < NUM_BUILTIN_TYPENAMES*2; i++) {
+        arraylist_push(&typecaches, jl_read_value(&s));
+    }
     jl_init_int32_int64_cache();
     jl_init_box_caches();
 
@@ -1591,6 +1616,13 @@ static void jl_restore_system_image_from_stream(ios_t *f)
     s.s = NULL;
 
     s.s = f;
+    init_builtin_typenames();
+    for (i = 0; i < builtin_typenames.len; i++) {
+        jl_typename_t *tn = (jl_typename_t*)builtin_typenames.items[i];
+        tn->cache = (jl_svec_t*)typecaches.items[i*2];
+        tn->linearcache = (jl_svec_t*)typecaches.items[i*2 + 1];
+        jl_rehash_type_cache(tn);
+    }
     // reinit items except ccallables
     jl_finalize_deserializer(&s);
     s.s = NULL;
@@ -1623,6 +1655,7 @@ static void jl_restore_system_image_from_stream(ios_t *f)
     ios_close(&fptr_record);
     ios_close(&sysimg);
     s.s = NULL;
+    arraylist_free(&typecaches);
 
     jl_gc_reset_alloc_count();
     jl_gc_enable(en);
@@ -1674,13 +1707,28 @@ JL_DLLEXPORT void jl_restore_system_image_data(const char *buf, size_t len)
 
 // --- init ---
 
+static void init_builtin_typenames(void)
+{
+    arraylist_new(&builtin_typenames, NUM_BUILTIN_TYPENAMES);
+    arraylist_push(&builtin_typenames, jl_array_typename);
+    arraylist_push(&builtin_typenames, ((jl_datatype_t*)jl_ref_type->body)->name);
+    arraylist_push(&builtin_typenames, jl_pointer_typename);
+    arraylist_push(&builtin_typenames, jl_type_typename);
+    arraylist_push(&builtin_typenames, ((jl_datatype_t*)jl_unwrap_unionall((jl_value_t*)jl_abstractarray_type))->name);
+    arraylist_push(&builtin_typenames, ((jl_datatype_t*)jl_unwrap_unionall((jl_value_t*)jl_densearray_type))->name);
+    arraylist_push(&builtin_typenames, jl_tuple_typename);
+    arraylist_push(&builtin_typenames, jl_vararg_typename);
+    arraylist_push(&builtin_typenames, jl_namedtuple_typename);
+    assert(builtin_typenames.len == NUM_BUILTIN_TYPENAMES);
+}
+
 static void jl_init_serializer2(int for_serialize)
 {
     if (for_serialize) {
         htable_new(&symbol_table, 0);
         htable_new(&fptr_to_id, sizeof(id_to_fptrs) / sizeof(*id_to_fptrs));
         htable_new(&backref_table, 0);
-        arraylist_new(&builtin_typenames, 0);
+        init_builtin_typenames();
         uintptr_t i;
         for (i = 0; id_to_fptrs[i] != NULL; i++) {
             ptrhash_put(&fptr_to_id, (void*)(uintptr_t)id_to_fptrs[i], (void*)(i + 2));
