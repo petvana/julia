@@ -20,6 +20,15 @@
 #endif
 #include <signal.h>
 
+enum jl_memory_order {
+    jl_memory_order_relaxed,
+    jl_memory_order_consume,
+    jl_memory_order_acquire,
+    jl_memory_order_release,
+    jl_memory_order_acq_rel,
+    jl_memory_order_seq_cst
+};
+
 /**
  * Thread synchronization primitives:
  *

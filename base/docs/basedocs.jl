@@ -1781,11 +1781,13 @@ julia> tuple(1, 'a', pi)
 tuple
 
 """
-    getfield(value, name::Symbol)
-    getfield(value, i::Int)
+    getfield(value, name::Symbol, [ordering::Symbol])
+    getfield(value, i::Int, [ordering::Symbol])
 
 Extract a field from a composite `value` by name or position.
 See also [`getproperty`](@ref Base.getproperty) and [`fieldnames`](@ref).
+
+The user must specify an atomic memory ordering for the operation if the field was declared with the `atomic` keyword.
 
 # Examples
 ```jldoctest

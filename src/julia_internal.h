@@ -1268,12 +1268,14 @@ extern jl_sym_t *optlevel_sym; extern jl_sym_t *compile_sym;
 extern jl_sym_t *infer_sym;
 extern jl_sym_t *atom_sym; extern jl_sym_t *statement_sym; extern jl_sym_t *all_sym;
 
+extern jl_sym_t *atomic_sym;
+extern jl_sym_t *none_sym;
 extern jl_sym_t *unordered_sym;
-extern jl_sym_t *monotonic_sym; // extern jl_sym_t *relaxed_sym;
+extern jl_sym_t *monotonic_sym; // or relaxed_sym?
 extern jl_sym_t *acquire_sym;
 extern jl_sym_t *release_sym;
 extern jl_sym_t *acquire_release_sym;
-extern jl_sym_t *sequentially_consistent_sym; // extern jl_sym_t *strong_sym;
+extern jl_sym_t *sequentially_consistent_sym; // or strong_sym?
 
 struct _jl_sysimg_fptrs_t;
 

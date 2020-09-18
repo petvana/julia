@@ -75,6 +75,7 @@ JL_DLLEXPORT jl_typename_t *jl_new_typename_in(jl_sym_t *name, jl_module_t *modu
     tn->hash = bitmix(bitmix(module ? module->build_id : 0, name->hash), 0xa1ada1da);
     tn->mt = NULL;
     tn->partial = NULL;
+    tn->atomicfields = NULL;
     return tn;
 }
 
@@ -82,7 +83,7 @@ JL_DLLEXPORT jl_typename_t *jl_new_typename_in(jl_sym_t *name, jl_module_t *modu
 
 jl_datatype_t *jl_new_abstracttype(jl_value_t *name, jl_module_t *module, jl_datatype_t *super, jl_svec_t *parameters)
 {
-    return jl_new_datatype((jl_sym_t*)name, module, super, parameters, jl_emptysvec, jl_emptysvec, 1, 0, 0);
+    return jl_new_datatype((jl_sym_t*)name, module, super, parameters, jl_emptysvec, jl_emptysvec, jl_emptysvec, 1, 0, 0);
 }
 
 jl_datatype_t *jl_new_uninitialized_datatype(void)
@@ -565,6 +566,7 @@ JL_DLLEXPORT jl_datatype_t *jl_new_datatype(
         jl_svec_t *parameters,
         jl_svec_t *fnames,
         jl_svec_t *ftypes,
+        jl_svec_t *fattrs,
         int abstract, int mutabl,
         int ninitialized)
 {
@@ -612,6 +614,31 @@ JL_DLLEXPORT jl_datatype_t *jl_new_datatype(
     t->name->names = fnames;
     jl_gc_wb(t->name, t->name->names);
 
+    uint32_t *atomicfields = NULL;
+    int i;
+    for (i = 0; i + 1 < jl_svec_len(fattrs); i += 2) {
+        jl_value_t *fldi = jl_svecref(fattrs, i);
+        jl_sym_t *attr = (jl_sym_t*)jl_svecref(fattrs, i + 1);
+        JL_TYPECHK(typeassert, long, fldi);
+        JL_TYPECHK(typeassert, symbol, (jl_value_t*)attr);
+        size_t fldn = jl_unbox_long(fldi);
+        if (fldn < 1 || fldn > jl_svec_len(fnames))
+            jl_errorf("invalid field attribute %lld", (long long)fldn);
+        fldn--;
+        if (attr == atomic_sym) {
+            if (atomicfields == NULL) {
+                size_t nb = LLT_ALIGN(jl_svec_len(fnames), 32) * sizeof(uint32_t);
+                atomicfields = (uint32_t*)malloc_s(nb);
+                memset(atomicfields, 0, nb);
+            }
+            atomicfields[fldn / 32] |= 1 << (fldn % 32);
+        }
+        else {
+            jl_errorf("invalid field attribute %s", jl_symbol_name(attr));
+        }
+    }
+    tn->atomicfields = atomicfields;
+
     if (t->name->wrapper == NULL) {
         t->name->wrapper = (jl_value_t*)t;
         jl_gc_wb(t->name, t);
@@ -635,7 +662,7 @@ JL_DLLEXPORT jl_datatype_t *jl_new_primitivetype(jl_value_t *name, jl_module_t *
                                                  jl_svec_t *parameters, size_t nbits)
 {
     jl_datatype_t *bt = jl_new_datatype((jl_sym_t*)name, module, super, parameters,
-                                        jl_emptysvec, jl_emptysvec, 0, 0, 0);
+                                        jl_emptysvec, jl_emptysvec, jl_emptysvec, 0, 0, 0);
     uint32_t nbytes = (nbits + 7) / 8;
     uint32_t alignm = next_power_of_two(nbytes);
     if (alignm > MAX_ALIGN)
@@ -656,7 +683,7 @@ JL_DLLEXPORT jl_datatype_t * jl_new_foreign_type(jl_sym_t *name,
                                                  int large)
 {
     jl_datatype_t *bt = jl_new_datatype(name, module, super,
-      jl_emptysvec, jl_emptysvec, jl_emptysvec, 0, 1, 0);
+      jl_emptysvec, jl_emptysvec, jl_emptysvec, jl_emptysvec, 0, 1, 0);
     bt->size = large ? GC_MAX_SZCLASS+1 : 0;
     jl_datatype_layout_t *layout = (jl_datatype_layout_t *)
       jl_gc_perm_alloc(sizeof(jl_datatype_layout_t) + sizeof(jl_fielddescdyn_t),
@@ -1107,6 +1134,7 @@ void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOT
             if (jl_is_datatype_singleton((jl_datatype_t*)jl_typeof(rhs)))
                 return;
         }
+        // TODO: if there are pointers, use memmove_refs
         jl_assign_bits((char*)v + offs, rhs);
         jl_gc_multi_wb(v, rhs);
     }

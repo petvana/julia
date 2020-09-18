@@ -774,10 +774,36 @@ JL_CALLABLE(jl_f_svec)
 
 // struct operations ------------------------------------------------------------
 
+enum jl_memory_order jl_check_atomic_order(jl_sym_t *order)
+{
+    if (order == unordered_sym || order == monotonic_sym)
+        return jl_memory_order_relaxed;
+    if (order == acquire_sym)
+        return jl_memory_order_acquire;
+    if (order == release_sym)
+        return jl_memory_order_release;
+    if (order == acquire_release_sym)
+        return jl_memory_order_acq_rel;
+    if (order == sequentially_consistent_sym)
+        return jl_memory_order_seq_cst;
+    jl_error("invalid atomic ordering");
+}
+
+
 JL_CALLABLE(jl_f_getfield)
 {
-    if (nargs == 3) {
-        JL_TYPECHK(getfield, bool, args[2]);
+    jl_sym_t *order = NULL;
+    if (nargs == 4) {
+        JL_TYPECHK(getfield, symbol, args[3]);
+        JL_TYPECHK(getfield, bool, args[4]);
+        nargs -= 2;
+        order = (jl_sym_t*)args[3];
+    }
+    else if (nargs == 3) {
+        if (!jl_is_bool(args[2])) {
+            JL_TYPECHK(getfield, symbol, args[2]);
+            order = (jl_sym_t*)args[2];
+        }
         nargs -= 1;
     }
     JL_NARGS(getfield, 2, 2);
@@ -785,27 +811,40 @@ JL_CALLABLE(jl_f_getfield)
     jl_value_t *vt = (jl_value_t*)jl_typeof(v);
     if (vt == (jl_value_t*)jl_module_type) {
         JL_TYPECHK(getfield, symbol, args[1]);
-        return jl_eval_global_var((jl_module_t*)v, (jl_sym_t*)args[1]);
-    }
-    if (!jl_is_datatype(vt))
-        jl_type_error("getfield", (jl_value_t*)jl_datatype_type, v);
-    jl_datatype_t *st = (jl_datatype_t*)vt;
-    size_t idx;
-    if (jl_is_long(args[1])) {
-        idx = jl_unbox_long(args[1])-1;
-        if (idx >= jl_datatype_nfields(st))
-            jl_bounds_error(args[0], args[1]);
+        v = jl_eval_global_var((jl_module_t*)v, (jl_sym_t*)args[1]);
     }
     else {
-        JL_TYPECHK(getfield, symbol, args[1]);
-        jl_sym_t *fld = (jl_sym_t*)args[1];
-        idx = jl_field_index(st, fld, 1);
+        if (!jl_is_datatype(vt))
+            jl_type_error("getfield", (jl_value_t*)jl_datatype_type, v);
+        jl_datatype_t *st = (jl_datatype_t*)vt;
+        size_t idx;
+        if (jl_is_long(args[1])) {
+            idx = jl_unbox_long(args[1])-1;
+            if (idx >= jl_datatype_nfields(st))
+                jl_bounds_error(args[0], args[1]);
+        }
+        else {
+            JL_TYPECHK(getfield, symbol, args[1]);
+            jl_sym_t *fld = (jl_sym_t*)args[1];
+            idx = jl_field_index(st, fld, 1);
+        }
+        v = jl_get_nth_field_checked(v, idx);
     }
-    return jl_get_nth_field_checked(v, idx);
+    if (order) {
+        if (jl_check_atomic_order(order) >= jl_memory_order_acq_rel)
+            jl_fence();
+    }
+    return v;
 }
 
 JL_CALLABLE(jl_f_setfield)
 {
+    jl_sym_t *order = NULL;
+    if (nargs == 4) {
+        JL_TYPECHK(getfield, symbol, args[3]);
+        nargs -= 1;
+        order = (jl_sym_t*)args[3];
+    }
     JL_NARGS(setfield!, 3, 3);
     jl_value_t *v = args[0];
     jl_datatype_t *st = (jl_datatype_t*)jl_typeof(v);
@@ -827,6 +866,10 @@ JL_CALLABLE(jl_f_setfield)
     jl_value_t *ft = jl_field_type_concrete(st, idx);
     if (!jl_isa(args[2], ft)) {
         jl_type_error("setfield!", ft, args[2]);
+    }
+    if (order) {
+        if (jl_check_atomic_order(order) >= jl_memory_order_relaxed)
+            jl_fence();
     }
     set_nth_field(st, (void*)v, idx, args[2]);
     return args[2];
@@ -1208,18 +1251,20 @@ JL_CALLABLE(jl_f_arrayset)
 
 JL_CALLABLE(jl_f__structtype)
 {
-    JL_NARGS(_structtype, 6, 6);
+    JL_NARGS(_structtype, 7, 7);
     JL_TYPECHK(_structtype, module, args[0]);
     JL_TYPECHK(_structtype, symbol, args[1]);
     JL_TYPECHK(_structtype, simplevector, args[2]);
     JL_TYPECHK(_structtype, simplevector, args[3]);
-    JL_TYPECHK(_structtype, bool, args[4]);
-    JL_TYPECHK(_structtype, long, args[5]);
+    JL_TYPECHK(_structtype, simplevector, args[4]);
+    JL_TYPECHK(_structtype, bool, args[5]);
+    JL_TYPECHK(_structtype, long, args[6]);
     jl_value_t *fieldnames = args[3];
+    jl_value_t *fieldattrs = args[4];
     jl_datatype_t *dt = NULL;
     dt = jl_new_datatype((jl_sym_t*)args[1], (jl_module_t*)args[0], NULL, (jl_svec_t*)args[2],
-                         (jl_svec_t*)fieldnames, NULL,
-                         0, args[4]==jl_true ? 1 : 0, jl_unbox_long(args[5]));
+                         (jl_svec_t*)fieldnames, NULL, (jl_svec_t*)fieldattrs,
+                         0, args[5]==jl_true ? 1 : 0, jl_unbox_long(args[6]));
     return dt->name->wrapper;
 }
 

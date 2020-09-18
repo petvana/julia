@@ -401,6 +401,8 @@ typedef struct {
     jl_sym_t *name;
     struct _jl_module_t *module;
     jl_svec_t *names;  // field names
+    const uint32_t *atomicfields; // if any fields are atomic, we record them here
+    //const uint32_t *constfields; // if any fields are const, we record them here
     // `wrapper` is either the only instantiation of the type (if no parameters)
     // or a UnionAll accepting parameters to make an instantiation.
     jl_value_t *wrapper;
@@ -1297,7 +1299,9 @@ JL_DLLEXPORT jl_datatype_t *jl_new_datatype(jl_sym_t *name,
                                             jl_module_t *module,
                                             jl_datatype_t *super,
                                             jl_svec_t *parameters,
-                                            jl_svec_t *fnames, jl_svec_t *ftypes,
+                                            jl_svec_t *fnames,
+                                            jl_svec_t *ftypes,
+                                            jl_svec_t *fattrs,
                                             int abstract, int mutabl,
                                             int ninitialized);
 JL_DLLEXPORT jl_datatype_t *jl_new_primitivetype(jl_value_t *name,

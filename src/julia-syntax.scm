@@ -663,8 +663,7 @@
   (define (throw-unassigned argname)
     `(call (core throw) (call (core UndefKeywordError) (inert ,argname))))
   (define (to-kw x)
-    (cond ((symbol? x) `(kw ,x ,(throw-unassigned x)))
-          ((decl? x) `(kw ,x ,(throw-unassigned (cadr x))))
+    (cond ((symdecl? x) `(kw ,x ,(throw-unassigned (decl-var x))))
           ((nospecialize-meta? x) `(meta ,(cadr x) ,(to-kw (caddr x))))
           (else x)))
   (if (has-parameters? argl)
@@ -877,9 +876,20 @@
 
 (define (struct-def-expr- name params bounds super fields0 mut)
   (receive
-   (fields defs) (separate (lambda (x) (or (symbol? x) (decl? x)))
+   (fields defs) (separate (lambda (x) (or (symbol? x) (eventually-decl? x)))
                            fields0)
-   (let* ((defs        (filter (lambda (x) (not (effect-free? x))) defs))
+   (let* ((attrs ())
+          (fields (let ((n 0))
+                    (map (lambda (x)
+                           (set! n (+ n 1))
+                           (if (and (pair? x) (not (decl? x)))
+                               (begin
+                                 (set! attrs (cons (quotify (car x)) (cons n attrs)))
+                                 (set! x (cadr x))))
+                           x)
+                         fields)))
+          (attrs (reverse attrs))
+          (defs        (filter (lambda (x) (not (effect-free? x))) defs))
           (locs        (if (and (pair? fields0) (linenum? (car fields0)))
                            (list (car fields0))
                            '()))
@@ -906,6 +916,7 @@
          (toplevel-only struct (outerref ,name))
          (= ,name (call (core _structtype) (thismodule) (inert ,name) (call (core svec) ,@params)
                         (call (core svec) ,@(map quotify field-names))
+                        (call (core svec) ,@attrs)
                         ,mut ,min-initialized))
          (call (core _setsuper!) ,name ,super)
          (if (isdefined (outerref ,name))
@@ -1187,7 +1198,7 @@
         (if (null? binds)
             blk
             (cond
-             ((or (symbol? (car binds)) (decl? (car binds)))
+             ((symdecl? (car binds))
               ;; just symbol -> add local
               (loop (cdr binds)
                     `(scope-block
@@ -1211,8 +1222,7 @@
                                 `(local-def ,name))
                            ,(car binds)
                            ,blk)))))
-               ((or (symbol? (cadar binds))
-                    (decl?   (cadar binds)))
+               ((symdecl?   (cadar binds))
                 (let ((vname (decl-var (cadar binds))))
                   (loop (cdr binds)
                         (if (expr-contains-eq vname (caddar binds))
@@ -1283,9 +1293,9 @@
       (if (null? f)
           '()
           (let ((x (car f)))
-            (cond ((or (symbol? x) (decl? x) (linenum? x))
+            (cond ((or (symdecl? x) (linenum? x))
                    (loop (cdr f)))
-                  ((and (assignment? x) (or (symbol? (cadr x)) (decl? (cadr x))))
+                  ((and (assignment? x) (symdecl? (cadr x)))
                    (error (string "\"" (deparse x) "\" inside type definition is reserved")))
                   (else '())))))
     (expand-forms
@@ -1370,6 +1380,9 @@
           ((= |::|)
            (expand-forms (expand-decls 'const (cdr e) #f)))
           (else e)))))
+
+(define (expand-atomic-decl e)
+  (error "unimplemented jwn"))
 
 (define (expand-local-or-global-decl e)
   (if (and (symbol? (cadr e)) (length= e 2))
@@ -1981,6 +1994,7 @@
    (lambda (e) (expand-forms (expand-wheres (cadr e) (cddr e))))
 
    'const  expand-const-decl
+   'atomic expand-atomic-decl
    'local  expand-local-or-global-decl
    'global expand-local-or-global-decl
    'local-def expand-local-or-global-decl
@@ -2493,15 +2507,13 @@
          ,result)))))
 
 (define (lhs-vars e)
-  (cond ((symbol? e) (list e))
-        ((decl? e)   (list (decl-var e)))
+  (cond ((symdecl? e)   (list (decl-var e)))
         ((and (pair? e) (eq? (car e) 'tuple))
          (apply append (map lhs-vars (cdr e))))
         (else '())))
 
 (define (lhs-decls e)
-  (cond ((symbol? e) (list e))
-        ((decl? e)   (list e))
+  (cond ((symdecl? e)   (list e))
         ((and (pair? e) (eq? (car e) 'tuple))
          (apply append (map lhs-decls (cdr e))))
         (else '())))
@@ -2978,6 +2990,7 @@ f(x) = yt(x)
                 ,@(map (lambda (p n) `(= ,p (call (core TypeVar) ',n (core Any)))) P names)
                 (= ,s (call (core _structtype) (thismodule) (inert ,name) (call (core svec) ,@P)
                             (call (core svec) ,@(map quotify fields))
+                            (call (core svec))
                             (false) ,(length fields)))
                 (= (outerref ,name) ,s)
                 (call (core _setsuper!) ,name ,super)
@@ -2991,6 +3004,7 @@ f(x) = yt(x)
                (block (global ,name) (const ,name)
                       (= ,s (call (core _structtype) (thismodule) (inert ,name) (call (core svec))
                                   (call (core svec) ,@(map quotify fields))
+                                  (call (core svec))
                                   (false) ,(length fields)))
                       (= (outerref ,name) ,s)
                       (call (core _setsuper!) ,name ,super)
@@ -3212,8 +3226,8 @@ f(x) = yt(x)
          meta inbounds boundscheck loopinfo decl aliasscope popaliasscope
          thunk with-static-parameters toplevel-only
          global globalref outerref const-if-global thismodule
-         const null true false ssavalue isdefined toplevel module lambda error
-         gc_preserve_begin gc_preserve_end import using export)))
+         const atomic null true false ssavalue isdefined toplevel module lambda
+         error gc_preserve_begin gc_preserve_end import using export)))
 
 (define (local-in? s lam)
   (or (assq s (car  (lam:vinfo lam)))
@@ -3428,6 +3442,7 @@ f(x) = yt(x)
                      '(null)
                      `(newvar ,(cadr e))))))
           ((const) e)
+          ((atomic) e)
           ((const-if-global)
            (if (local-in? (cadr e) lam)
                '(null)
@@ -4175,6 +4190,7 @@ f(x) = yt(x)
                      (if (not global-const-error)
                          (set! global-const-error current-loc))
                      (emit e))))
+            ((atomic) (error "unimplemented jwn"))
             ((isdefined) (if tail (emit-return e) e))
             ((boundscheck) (if tail (emit-return e) e))
 

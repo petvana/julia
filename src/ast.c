@@ -66,6 +66,16 @@ jl_sym_t *optlevel_sym; jl_sym_t *thismodule_sym;
 jl_sym_t *atom_sym; jl_sym_t *statement_sym; jl_sym_t *all_sym;
 jl_sym_t *compile_sym; jl_sym_t *infer_sym;
 
+jl_sym_t *atomic_sym;
+jl_sym_t *none_sym;
+jl_sym_t *unordered_sym;
+jl_sym_t *monotonic_sym; // or relaxed_sym?
+jl_sym_t *acquire_sym;
+jl_sym_t *release_sym;
+jl_sym_t *acquire_release_sym;
+jl_sym_t *sequentially_consistent_sym; // or strong_sym?
+
+
 static uint8_t flisp_system_image[] = {
 #include <julia_flisp.boot.inc>
 };
@@ -402,6 +412,14 @@ void jl_init_common_symbols(void)
     atom_sym = jl_symbol("atom");
     statement_sym = jl_symbol("statement");
     all_sym = jl_symbol("all");
+    atomic_sym = jl_symbol("atomic");
+    none_sym = jl_symbol("none");
+    unordered_sym = jl_symbol("unordered");
+    monotonic_sym = jl_symbol("monotonic");
+    acquire_sym = jl_symbol("acquire");
+    release_sym = jl_symbol("release");
+    acquire_release_sym = jl_symbol("acquire_release");
+    sequentially_consistent_sym = jl_symbol("sequentially_consistent");
 }
 
 JL_DLLEXPORT void jl_lisp_prompt(void)

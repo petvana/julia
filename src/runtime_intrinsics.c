@@ -91,7 +91,7 @@ JL_DLLEXPORT jl_value_t *jl_atomics_pointerref(jl_value_t *p, jl_value_t *order)
         char *pp = (char*)jl_unbox_long(p);
         if ((nb & (nb - 1)) != 0 || nb > 16)
             jl_error("pointerref: invalid atomic operation");
-        return jl_new_bits(ety, pp);
+        return jl_atomics_new_bits(ety, pp);
     }
 }
 
