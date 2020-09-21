@@ -124,6 +124,7 @@ static DIType *_julia_type_to_di(jl_codegen_params_t *ctx, jl_value_t *jt, DIBui
             DIType *di;
             if (jl_field_isptr(jdt, i))
                 di = jl_pvalue_dillvmt;
+            // TODO: elseif jl_islayout_inline
             else
                 di = _julia_type_to_di(ctx, el, dbuilder, false);
             Elements[i] = di;
@@ -607,9 +608,14 @@ static Type *_julia_struct_to_llvm(jl_codegen_params_t *ctx, jl_value_t *jt, jl_
             jlasttype = ty;
             size_t fsz = 0, al = 0;
             bool isptr = !jl_islayout_inline(ty, &fsz, &al);
+            if (jl_field_isatomic(jst, i)) {
+                // TODO: eventually support this?
+                // though it's a bit unclear how the implicit load should be interpreted
+                return NULL;
+            }
             if (jst->layout) {
                 assert(isptr == jl_field_isptr(jst, i));
-                assert((isptr ? sizeof(void*) : fsz + jl_is_uniontype(ty)) == jl_field_size(jst, i));
+                assert(isptr ? sizeof(void*) : fsz + jl_is_uniontype(ty) == jl_field_size(jst, i));
             }
             Type *lty;
             if (isptr) {
@@ -620,23 +626,25 @@ static Type *_julia_struct_to_llvm(jl_codegen_params_t *ctx, jl_value_t *jt, jl_
                 lty = T_int8;
             }
             else if (jl_is_uniontype(ty)) {
-                // pick an Integer type size such that alignment will generally be correct,
-                // and always end with an Int8 (selector byte).
-                // We may need to insert padding first to get to the right offset
-                if (al > MAX_ALIGN) {
-                    Type *AlignmentType = ArrayType::get(VectorType::get(T_int8, al), 0);
-                    latypes.push_back(AlignmentType);
-                    al = MAX_ALIGN;
+                if (fsz > 0) {
+                    // pick an Integer type size such that alignment will generally be correct,
+                    // and always end with an Int8 (selector byte).
+                    // We may need to insert padding first to get to the right offset
+                    if (al > MAX_ALIGN) {
+                        Type *AlignmentType = ArrayType::get(VectorType::get(T_int8, al), 0);
+                        latypes.push_back(AlignmentType);
+                        al = MAX_ALIGN;
+                    }
+                    assert(al <= jl_field_align(jst, i));
+                    Type *AlignmentType = IntegerType::get(jl_LLVMContext, 8 * al);
+                    unsigned NumATy = fsz / al;
+                    unsigned remainder = fsz % al;
+                    assert(al == 1 || NumATy > 0);
+                    while (NumATy--)
+                        latypes.push_back(AlignmentType);
+                    while (remainder--)
+                        latypes.push_back(T_int8);
                 }
-                assert(al <= jl_field_align(jst, i));
-                Type *AlignmentType = IntegerType::get(jl_LLVMContext, 8 * al);
-                unsigned NumATy = fsz / al;
-                unsigned remainder = fsz % al;
-                assert(al == 1 || NumATy > 0);
-                while (NumATy--)
-                    latypes.push_back(AlignmentType);
-                while (remainder--)
-                    latypes.push_back(T_int8);
                 latypes.push_back(T_int8);
                 isarray = false;
                 allghost = false;

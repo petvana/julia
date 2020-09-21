@@ -134,6 +134,26 @@ STATIC_INLINE uint32_t jl_int32hash_fast(uint32_t a)
 }
 
 
+// this is a version of memcpy that preserves atomic memory ordering
+// which makes it safe to use for objects that can contain memory references
+// without risk of creating pointers out of thin air
+// TODO: replace with LLVM's llvm.memmove.element.unordered.atomic.p0i8.p0i8.i32
+//       aka `__llvm_memmove_element_unordered_atomic_8` (for 64 bit)
+static inline void memmove_refs(void **dstp, void *const *srcp, size_t n) JL_NOTSAFEPOINT
+{
+    size_t i;
+    if (dstp < srcp || dstp > srcp + n) {
+        for (i = 0; i < n; i++) {
+            jl_atomic_store_relaxed(dstp + i, jl_atomic_load_relaxed(srcp + i));
+        }
+    }
+    else {
+        for (i = 0; i < n; i++) {
+            jl_atomic_store_relaxed(dstp + n - i - 1, jl_atomic_load_relaxed(srcp + n - i - 1));
+        }
+    }
+}
+
 // -- gc.c -- //
 
 #define GC_CLEAN  0 // freshly allocated
@@ -471,7 +491,6 @@ jl_value_t *jl_wrap_vararg(jl_value_t *t, jl_value_t *n);
 void jl_reinstantiate_inner_types(jl_datatype_t *t);
 jl_datatype_t *jl_lookup_cache_type_(jl_datatype_t *type);
 void jl_cache_type_(jl_datatype_t *type);
-void jl_assign_bits(void *dest, jl_value_t *bits) JL_NOTSAFEPOINT;
 void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOTSAFEPOINT;
 jl_expr_t *jl_exprn(jl_sym_t *head, size_t n);
 jl_function_t *jl_new_generic_function(jl_sym_t *name, jl_module_t *module);

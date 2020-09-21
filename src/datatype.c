@@ -444,10 +444,12 @@ void jl_compute_field_offsets(jl_datatype_t *st)
         int zeroinit = 0;
         int haspadding = 0;
         int homogeneous = 1;
+        int needlock = 0;
         uint32_t npointers = 0;
         jl_value_t *firstty = jl_field_type(st, 0);
         for (i = 0; i < nfields; i++) {
             jl_value_t *fld = jl_field_type(st, i);
+            int isatomic = jl_field_isatomic(st, i);
             size_t fsz = 0, al = 1;
             if (jl_islayout_inline(fld, &fsz, &al)) { // aka jl_datatype_isinlinealloc
                 if (__unlikely(fsz > max_size))
@@ -487,9 +489,15 @@ void jl_compute_field_offsets(jl_datatype_t *st)
                     haspadding = 1;
                 }
             }
+            if (isatomic && fsz > 16)
+                needlock = 1;
+            if (isatomic && fsz <= 16)
+                al = fsz;
             if (al != 0) {
                 size_t alsz = LLT_ALIGN(sz, al);
-                if (sz & (al - 1))
+                if (isatomic && fsz <= 16)
+                    alsz = next_power_of_two(alsz);
+                if (alsz != sz)
                     haspadding = 1;
                 sz = alsz;
                 if (al > alignm)
@@ -614,28 +622,42 @@ JL_DLLEXPORT jl_datatype_t *jl_new_datatype(
     t->name->names = fnames;
     jl_gc_wb(t->name, t->name->names);
 
-    uint32_t *atomicfields = NULL;
-    int i;
-    for (i = 0; i + 1 < jl_svec_len(fattrs); i += 2) {
-        jl_value_t *fldi = jl_svecref(fattrs, i);
-        jl_sym_t *attr = (jl_sym_t*)jl_svecref(fattrs, i + 1);
-        JL_TYPECHK(typeassert, long, fldi);
-        JL_TYPECHK(typeassert, symbol, (jl_value_t*)attr);
-        size_t fldn = jl_unbox_long(fldi);
-        if (fldn < 1 || fldn > jl_svec_len(fnames))
-            jl_errorf("invalid field attribute %lld", (long long)fldn);
-        fldn--;
-        if (attr == atomic_sym) {
-            if (atomicfields == NULL) {
-                size_t nb = LLT_ALIGN(jl_svec_len(fnames), 32) * sizeof(uint32_t);
-                atomicfields = (uint32_t*)malloc_s(nb);
-                memset(atomicfields, 0, nb);
+    uint32_t *volatile atomicfields = NULL;
+    if (jl_get_ptls_states()->current_task) { // can't use JL_TRY too early in bootstrapping
+        int i;
+        JL_TRY {
+            for (i = 0; i + 1 < jl_svec_len(fattrs); i += 2) {
+                jl_value_t *fldi = jl_svecref(fattrs, i);
+                jl_sym_t *attr = (jl_sym_t*)jl_svecref(fattrs, i + 1);
+                JL_TYPECHK(typeassert, long, fldi);
+                JL_TYPECHK(typeassert, symbol, (jl_value_t*)attr);
+                size_t fldn = jl_unbox_long(fldi);
+                if (fldn < 1 || fldn > jl_svec_len(fnames))
+                    jl_errorf("invalid field attribute %lld", (long long)fldn);
+                fldn--;
+                if (attr == atomic_sym) {
+                    if (!mutabl)
+                        jl_errorf("invalid field attribute atomic for immutable struct");
+                    if (atomicfields == NULL) {
+                        size_t nb = LLT_ALIGN(jl_svec_len(fnames), 32) * sizeof(uint32_t);
+                        atomicfields = (uint32_t*)malloc_s(nb);
+                        memset(atomicfields, 0, nb);
+                    }
+                    atomicfields[fldn / 32] |= 1 << (fldn % 32);
+                }
+                else {
+                    jl_errorf("invalid field attribute %s", jl_symbol_name(attr));
+                }
             }
-            atomicfields[fldn / 32] |= 1 << (fldn % 32);
         }
-        else {
-            jl_errorf("invalid field attribute %s", jl_symbol_name(attr));
+        JL_CATCH {
+            if (atomicfields)
+                free(atomicfields);
+            jl_rethrow();
         }
+    }
+    else if (fattrs != jl_emptysvec) {
+        jl_error("field attributes not implemented for builtins");
     }
     tn->atomicfields = atomicfields;
 
@@ -746,23 +768,6 @@ JL_DLLEXPORT jl_value_t *jl_typemax_uint(jl_value_t *bt)
     jl_value_t *v = jl_gc_alloc(jl_get_ptls_states(), sizeof(size_t), bt);
     memcpy(v, &data, sizeof(size_t));
     return v;
-}
-
-void jl_assign_bits(void *dest, jl_value_t *bits) JL_NOTSAFEPOINT
-{
-    // bits must be a heap box.
-    size_t nb = jl_datatype_size(jl_typeof(bits));
-    if (nb == 0) return;
-    switch (nb) {
-    case  1: *(uint8_t*)dest    = *(uint8_t*)bits;    break;
-    case  2: jl_store_unaligned_i16(dest, *(uint16_t*)bits); break;
-    case  4: jl_store_unaligned_i32(dest, *(uint32_t*)bits); break;
-    case  8: jl_store_unaligned_i64(dest, *(uint64_t*)bits); break;
-    case 16:
-        memcpy(dest, jl_assume_aligned(bits, 16), 16);
-        break;
-    default: memcpy(dest, bits, nb);
-    }
 }
 
 #define PERMBOXN_FUNC(nb,nw)                                            \
@@ -999,14 +1004,15 @@ JL_DLLEXPORT jl_value_t *jl_new_structt(jl_datatype_t *type, jl_value_t *tup)
         }
         return type->instance;
     }
-    jl_value_t *jv = jl_gc_alloc(ptls, jl_datatype_size(type), type);
+    size_t size = jl_datatype_size(type);
+    jl_value_t *jv = jl_gc_alloc(ptls, size, type);
     jl_value_t *fi = NULL;
     JL_GC_PUSH2(&jv, &fi);
-    if (type->layout->npointers > 0) {
+    if (type->zeroinit) {
         // if there are references, zero the space first to prevent the GC
         // from seeing uninitialized references during jl_get_nth_field and jl_isa,
         // which can allocate.
-        memset(jl_data_ptr(jv), 0, jl_datatype_size(type));
+        memset(jl_data_ptr(jv), 0, size);
     }
     for (size_t i = 0; i < nargs; i++) {
         jl_value_t *ft = jl_field_type_concrete(type, i);
@@ -1112,6 +1118,31 @@ JL_DLLEXPORT jl_value_t *jl_get_nth_field_checked(jl_value_t *v, size_t i)
     return undefref_check((jl_datatype_t*)ty, jl_new_bits(ty, (char*)v + offs));
 }
 
+static inline void memassign_safe(int hasptr, jl_value_t *parent, char *dst, const jl_value_t *src, size_t nb) JL_NOTSAFEPOINT
+{
+    if (hasptr) {
+        assert(nb >= jl_datatype_size(jl_typeof(src))); // dst might have some undefined bits, but the src heap box should be okay with that
+        size_t nptr = nb / sizeof(void*);
+        memmove_refs((void**)dst, (void**)src, nptr);
+        jl_gc_multi_wb(parent, src);
+        src = (jl_value_t*)((char*)src + nptr * sizeof(void*));
+        nb -= nptr * sizeof(void*);
+    }
+    else {
+        // src must be a heap box.
+        assert(nb == jl_datatype_size(jl_typeof(src)));
+    }
+    switch (nb) {
+    case  0:                                               break;
+    case  1: *(uint8_t*)dst            = *(uint8_t*)src;   break;
+    case  2: jl_store_unaligned_i16(dst, *(uint16_t*)src); break;
+    case  4: jl_store_unaligned_i32(dst, *(uint32_t*)src); break;
+    case  8: jl_store_unaligned_i64(dst, *(uint64_t*)src); break;
+    case 16: memcpy(dst, jl_assume_aligned(src, 16), 16);  break;
+    default: memcpy(dst, src, nb);                         break;
+    }
+}
+
 void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOTSAFEPOINT
 {
     size_t offs = jl_field_offset(st, i);
@@ -1125,18 +1156,26 @@ void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOT
     }
     else {
         jl_value_t *ty = jl_field_type_concrete(st, i);
+        size_t fsz = jl_field_size(st, i);
+        int hasptr;
         if (jl_is_uniontype(ty)) {
-            uint8_t *psel = &((uint8_t*)v)[offs + jl_field_size(st, i) - 1];
+            jl_value_t *rty = jl_typeof(rhs);
+            uint8_t *psel = &((uint8_t*)v)[offs + fsz - 1];
             unsigned nth = 0;
-            if (!jl_find_union_component(ty, jl_typeof(rhs), &nth))
+            if (!jl_find_union_component(ty, rty, &nth))
                 assert(0 && "invalid field assignment to isbits union");
             *psel = nth;
-            if (jl_is_datatype_singleton((jl_datatype_t*)jl_typeof(rhs)))
+            if (jl_is_datatype_singleton((jl_datatype_t*)rty))
                 return;
+            hasptr = 0;
+            fsz = jl_datatype_size((jl_datatype_t*)rty); // need to shrink-wrap the copy
         }
-        // TODO: if there are pointers, use memmove_refs
-        jl_assign_bits((char*)v + offs, rhs);
-        jl_gc_multi_wb(v, rhs);
+        else {
+            hasptr = ((jl_datatype_t*)ty)->layout->npointers > 0;
+            // should be safe enough to read fsz bytes from rhs
+            // due to gc alignment considerations
+        }
+        memassign_safe(hasptr, v, (char*)v + offs, rhs, fsz);
     }
 }
 
@@ -1144,16 +1183,15 @@ JL_DLLEXPORT int jl_field_isdefined(jl_value_t *v, size_t i) JL_NOTSAFEPOINT
 {
     jl_datatype_t *st = (jl_datatype_t*)jl_typeof(v);
     size_t offs = jl_field_offset(st, i);
-    char *fld = (char*)v + offs;
-    if (jl_field_isptr(st, i)) {
-        jl_value_t *fval = jl_atomic_load_relaxed((jl_value_t**)fld);
-        return fval != NULL;
+    jl_value_t **fld = (jl_value_t**)((char*)v + offs);
+    if (!jl_field_isptr(st, i)) {
+        jl_datatype_t *ft = (jl_datatype_t*)jl_field_type_concrete(st, i);
+        if (!jl_is_datatype(ft) || ft->layout->first_ptr < 0)
+            return 1; // isbits are always defined
+        fld += ft->layout->first_ptr;
     }
-    jl_datatype_t *ft = (jl_datatype_t*)jl_field_type_concrete(st, i);
-    if (jl_is_datatype(ft) && ft->layout->first_ptr >= 0) {
-         return ((jl_value_t**)fld)[ft->layout->first_ptr] != NULL;
-    }
-    return 1;
+    jl_value_t *fval = jl_atomic_load_relaxed(fld);
+    return fval != NULL;
 }
 
 JL_DLLEXPORT size_t jl_get_field_offset(jl_datatype_t *ty, int field) JL_NOTSAFEPOINT

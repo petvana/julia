@@ -973,29 +973,37 @@ JL_CALLABLE(jl_f_isdefined)
 {
     jl_module_t *m = NULL;
     jl_sym_t *s = NULL;
-    JL_NARGS(isdefined, 2, 2);
-    if (!jl_is_module(args[0])) {
-        jl_datatype_t *vt = (jl_datatype_t*)jl_typeof(args[0]);
-        assert(jl_is_datatype(vt));
-        size_t idx;
-        if (jl_is_long(args[1])) {
-            idx = jl_unbox_long(args[1]) - 1;
-            if (idx >= jl_datatype_nfields(vt))
-                return jl_false;
-        }
-        else {
-            JL_TYPECHK(isdefined, symbol, args[1]);
-            idx = jl_field_index(vt, (jl_sym_t*)args[1], 0);
-            if ((int)idx == -1)
-                return jl_false;
-        }
-        return jl_field_isdefined(args[0], idx) ? jl_true : jl_false;
+    JL_NARGS(isdefined, 2, 3);
+    jl_sym_t *order = NULL;
+    if (nargs == 3) {
+        JL_TYPECHK(isdefined, symbol, args[2]);
+        order = (jl_sym_t*)args[2];
     }
-    JL_TYPECHK(isdefined, module, args[0]);
-    JL_TYPECHK(isdefined, symbol, args[1]);
-    m = (jl_module_t*)args[0];
-    s = (jl_sym_t*)args[1];
-    return jl_boundp(m, s) ? jl_true : jl_false;
+    if (jl_is_module(args[0])) {
+        JL_TYPECHK(isdefined, symbol, args[1]);
+        m = (jl_module_t*)args[0];
+        s = (jl_sym_t*)args[1];
+        return jl_boundp(m, s) ? jl_true : jl_false;
+    }
+    jl_datatype_t *vt = (jl_datatype_t*)jl_typeof(args[0]);
+    assert(jl_is_datatype(vt));
+    size_t idx;
+    if (jl_is_long(args[1])) {
+        idx = jl_unbox_long(args[1]) - 1;
+        if (idx >= jl_datatype_nfields(vt))
+            return jl_false;
+    }
+    else {
+        JL_TYPECHK(isdefined, symbol, args[1]);
+        idx = jl_field_index(vt, (jl_sym_t*)args[1], 0);
+        if ((int)idx == -1)
+            return jl_false;
+    }
+    if (order) {
+        if (jl_check_atomic_order(order) >= jl_memory_order_relaxed)
+            jl_fence();
+    }
+    return jl_field_isdefined(args[0], idx) ? jl_true : jl_false;
 }
 
 

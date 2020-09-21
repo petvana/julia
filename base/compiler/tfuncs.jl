@@ -257,6 +257,7 @@ function isdefined_nothrow(argtypes::Array{Any, 1})
         (argtypes[2] ⊑ Symbol || argtypes[2] ⊑ Int) :
          argtypes[2] ⊑ Symbol
 end
+isdefined_tfunc(arg1, sym, order) = (@nospecialize; isdefined_tfunc(arg1, sym))
 function isdefined_tfunc(@nospecialize(arg1), @nospecialize(sym))
     if isa(arg1, Const)
         a1 = typeof(arg1.val)
@@ -302,7 +303,7 @@ function isdefined_tfunc(@nospecialize(arg1), @nospecialize(sym))
     end
     return Bool
 end
-add_tfunc(isdefined, 2, 2, isdefined_tfunc, 1)
+add_tfunc(isdefined, 2, 3, isdefined_tfunc, 1)
 
 function sizeof_nothrow(@nospecialize(x))
     if isa(x, Const)
@@ -751,7 +752,9 @@ function getfield_nothrow(@nospecialize(s00), @nospecialize(name), @nospecialize
     return false
 end
 
-getfield_tfunc(@nospecialize(s00), @nospecialize(name), @nospecialize(inbounds)) =
+getfield_tfunc(@nospecialize(s00), @nospecialize(name), @nospecialize(inbounds_or_order)) =
+    getfield_tfunc(s00, name)
+getfield_tfunc(@nospecialize(s00), @nospecialize(name), @nospecialize(order), @nospecialize(inbounds)) =
     getfield_tfunc(s00, name)
 function getfield_tfunc(@nospecialize(s00), @nospecialize(name))
     s = unwrap_unionall(s00)
@@ -899,10 +902,12 @@ function getfield_tfunc(@nospecialize(s00), @nospecialize(name))
     end
     return rewrap_unionall(R, s00)
 end
-add_tfunc(getfield, 2, 3, getfield_tfunc, 1)
-add_tfunc(setfield!, 3, 3, (@nospecialize(o), @nospecialize(f), @nospecialize(v)) -> v, 3)
-fieldtype_tfunc(@nospecialize(s0), @nospecialize(name), @nospecialize(inbounds)) =
-    fieldtype_tfunc(s0, name)
+
+setfield!_tfunc(o, f, v, order) = (@nospecialize; v)
+setfield!_tfunc(o, f, v) = (@nospecialize; v)
+
+add_tfunc(getfield, 2, 4, getfield_tfunc, 1)
+add_tfunc(setfield!, 3, 4, setfield!_tfunc, 3)
 
 function fieldtype_nothrow(@nospecialize(s0), @nospecialize(name))
     s0 === Bottom && return true # unreachable
@@ -961,6 +966,7 @@ function _fieldtype_nothrow(@nospecialize(s), exact::Bool, name::Const)
     return true
 end
 
+fieldtype_tfunc(s0, name, inbounds) = (@nospecialize; fieldtype_tfunc(s0, name))
 function fieldtype_tfunc(@nospecialize(s0), @nospecialize(name))
     if s0 === Bottom
         return Bottom

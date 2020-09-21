@@ -827,10 +827,10 @@ JL_DLLEXPORT void jl_gc_use(jl_value_t *a);
 JL_DLLEXPORT void jl_clear_malloc_data(void);
 
 // GC write barriers
-JL_DLLEXPORT void jl_gc_queue_root(jl_value_t *root) JL_NOTSAFEPOINT;
-JL_DLLEXPORT void jl_gc_queue_multiroot(jl_value_t *root, jl_value_t *stored) JL_NOTSAFEPOINT;
+JL_DLLEXPORT void jl_gc_queue_root(const jl_value_t *root) JL_NOTSAFEPOINT;
+JL_DLLEXPORT void jl_gc_queue_multiroot(const jl_value_t *root, const jl_value_t *stored) JL_NOTSAFEPOINT;
 
-STATIC_INLINE void jl_gc_wb(void *parent, void *ptr) JL_NOTSAFEPOINT
+STATIC_INLINE void jl_gc_wb(const void *parent, const void *ptr) JL_NOTSAFEPOINT
 {
     // parent and ptr isa jl_value_t*
     if (__unlikely(jl_astaggedvalue(parent)->bits.gc == 3 && // parent is old and not in remset
@@ -838,7 +838,7 @@ STATIC_INLINE void jl_gc_wb(void *parent, void *ptr) JL_NOTSAFEPOINT
         jl_gc_queue_root((jl_value_t*)parent);
 }
 
-STATIC_INLINE void jl_gc_wb_back(void *ptr) JL_NOTSAFEPOINT // ptr isa jl_value_t*
+STATIC_INLINE void jl_gc_wb_back(const void *ptr) JL_NOTSAFEPOINT // ptr isa jl_value_t*
 {
     // if ptr is old
     if (__unlikely(jl_astaggedvalue(ptr)->bits.gc == 3)) {
@@ -846,7 +846,7 @@ STATIC_INLINE void jl_gc_wb_back(void *ptr) JL_NOTSAFEPOINT // ptr isa jl_value_
     }
 }
 
-STATIC_INLINE void jl_gc_multi_wb(void *parent, jl_value_t *ptr) JL_NOTSAFEPOINT
+STATIC_INLINE void jl_gc_multi_wb(const void *parent, const jl_value_t *ptr) JL_NOTSAFEPOINT
 {
     // ptr is an immutable object
     if (__likely(jl_astaggedvalue(parent)->bits.gc != 3))
@@ -1093,6 +1093,17 @@ static inline uint32_t jl_ptr_offset(jl_datatype_t *st, int i) JL_NOTSAFEPOINT
         assert(ly->fielddesc_type == 2);
         return ((const uint32_t*)ptrs)[i];
     }
+}
+
+static inline int jl_field_isatomic(jl_datatype_t *st, int i) JL_NOTSAFEPOINT
+{
+    // if (!st->mutable) return 0; // TODO: is this fast-path helpful?
+    const uint32_t *atomicfields = st->name->atomicfields;
+    if (atomicfields != NULL) {
+        if (atomicfields[i / 32] & (1 << (i % 32)))
+            return 1;
+    }
+    return 0;
 }
 
 static inline int jl_is_layout_opaque(const jl_datatype_layout_t *l) JL_NOTSAFEPOINT
