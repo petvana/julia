@@ -2777,7 +2777,9 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                     *ret = typed_load(ctx,
                             emit_arrayptr(ctx, ary, ary_ex),
                             idx, ety,
-                            !isboxed ? tbaa_arraybuf : tbaa_ptrarraybuf, aliasscope);
+                            isboxed ? tbaa_ptrarraybuf : tbaa_arraybuf,
+                            aliasscope,
+                            isboxed);
                 }
                 return true;
             }
@@ -2847,7 +2849,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                             data_owner->addIncoming(aryv, curBB);
                             data_owner->addIncoming(own_ptr, ownedBB);
                         }
-                        if (jl_is_uniontype(ety)) {
+                        if (!isboxed && jl_is_uniontype(ety)) {
                             Type *AT = ArrayType::get(IntegerType::get(jl_LLVMContext, 8 * al), (elsz + al - 1) / al);
                             Value *data = emit_bitcast(ctx, emit_arrayptr(ctx, ary, ary_ex), AT->getPointerTo());
                             // compute tindex from val
@@ -2878,8 +2880,9 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                             typed_store(ctx,
                                         emit_arrayptr(ctx, ary, ary_ex, isboxed),
                                         idx, val, ety,
-                                        !isboxed ? tbaa_arraybuf : tbaa_ptrarraybuf,
-                                        ctx.aliasscope, data_owner, 0);
+                                        isboxed ? tbaa_ptrarraybuf : tbaa_arraybuf,
+                                        ctx.aliasscope, data_owner,
+                                        isboxed, 0);
                         }
                     }
                     *ret = ary;
@@ -3002,7 +3005,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                         Value *ptr = maybe_decay_tracked(ctx, data_pointer(ctx, obj));
                         *ret = typed_load(ctx, ptr, vidx,
                                 isboxed ? (jl_value_t*)jl_any_type : jt,
-                                obj.tbaa, nullptr, false);
+                                obj.tbaa, nullptr, isboxed, false);
                         return true;
                     }
                 }

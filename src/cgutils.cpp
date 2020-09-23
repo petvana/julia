@@ -1417,12 +1417,11 @@ Value *extract_first_ptr(jl_codectx_t &ctx, Value *V)
 // If `nullcheck` is not NULL and a pointer NULL check is necessary
 // store the pointer to be checked in `*nullcheck` instead of checking it
 static jl_cgval_t typed_load(jl_codectx_t &ctx, Value *ptr, Value *idx_0based, jl_value_t *jltype,
-                             MDNode *tbaa, MDNode *aliasscope,
+                             MDNode *tbaa, MDNode *aliasscope, bool isboxed,
                              bool maybe_null_if_boxed = true, unsigned alignment = 0,
                              Value **nullcheck = nullptr)
 {
-    bool isboxed;
-    Type *elty = julia_type_to_llvm(ctx, jltype, &isboxed);
+    Type *elty = isboxed ? T_prjlvalue : julia_type_to_llvm(ctx, jltype);
     if (type_is_ghost(elty))
         return ghostValue(jltype);
     Type *ptrty = PointerType::get(elty, ptr->getType()->getPointerAddressSpace());
@@ -1472,10 +1471,9 @@ static void typed_store(jl_codectx_t &ctx,
         Value *ptr, Value *idx_0based, const jl_cgval_t &rhs,
         jl_value_t *jltype, MDNode *tbaa, MDNode *aliasscope,
         Value *parent,  // for the write barrier, NULL if no barrier needed
-        unsigned alignment = 0)
+        bool isboxed, unsigned alignment = 0)
 {
-    bool isboxed;
-    Type *elty = julia_type_to_llvm(ctx, jltype, &isboxed);
+    Type *elty = isboxed ? T_prjlvalue : julia_type_to_llvm(ctx, jltype);
     if (type_is_ghost(elty))
         return;
     Value *r;
@@ -1741,7 +1739,7 @@ static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
                 *ret = mark_julia_slot(addr, jft, NULL, strct.tbaa);
                 return true;
             }
-            *ret = typed_load(ctx, ptr, idx, jft, strct.tbaa, nullptr, maybe_null);
+            *ret = typed_load(ctx, ptr, idx, jft, strct.tbaa, nullptr, false, maybe_null);
             return true;
         }
         else if (strct.isboxed) {
@@ -1862,7 +1860,7 @@ static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &st
         unsigned align = jl_field_align(jt, idx);
         order = needlock ? jl_memory_order_notatomic : order;
         // if (needlock) emit_lock
-        jl_cgval_t ret = typed_load(ctx, addr, NULL, jfty, tbaa, nullptr, maybe_null, align, nullcheck);
+        jl_cgval_t ret = typed_load(ctx, addr, NULL, jfty, tbaa, nullptr, false, maybe_null, align, nullcheck);
         // if (needlock) emit_unlock
         return ret;
     }
@@ -2870,17 +2868,7 @@ static void emit_setfield(jl_codectx_t &ctx,
                     ConstantInt::get(T_size, byte_offset)); // TODO: use emit_struct_gep
         }
         jl_value_t *jfty = jl_svecref(sty->types, idx0);
-        if (jl_field_isptr(sty, idx0)) {
-            Value *r = boxed(ctx, rhs); // don't need a temporary gcroot since it'll be rooted by strct
-            StoreInst *store = ctx.builder.CreateAlignedStore(r,
-                        emit_bitcast(ctx, addr, T_pprjlvalue),
-                        Align(sizeof(jl_value_t*)));
-            tbaa_decorate(strct.tbaa, store);
-            store->setOrdering(order <= jl_memory_order_unordered ? AtomicOrdering::Unordered : get_llvm_atomic_order(order));
-            if (wb && strct.isboxed && !type_is_permalloc(rhs.typ))
-                emit_write_barrier(ctx, boxed(ctx, strct), r);
-        }
-        else if (jl_is_uniontype(jfty)) {
+        if (!jl_field_isptr(sty, idx0) && jl_is_uniontype(jfty)) {
             int fsz = jl_field_size(sty, idx0) - 1;
             // compute tindex from rhs
             jl_cgval_t rhs_union = convert_julia_type(ctx, rhs, jfty);
@@ -2897,9 +2885,10 @@ static void emit_setfield(jl_codectx_t &ctx,
         }
         else {
             unsigned align = jl_field_align(sty, idx0);
-            typed_store(ctx, addr, NULL, rhs, jfty,
-                strct.tbaa, nullptr, maybe_bitcast(ctx,
-                data_pointer(ctx, strct), T_pjlvalue), align);
+            order <= jl_memory_order_unordered ? AtomicOrdering::Unordered : get_llvm_atomic_order(order);
+            typed_store(ctx, addr, NULL, rhs, jfty, strct.tbaa, nullptr,
+                wb ? maybe_bitcast(ctx, data_pointer(ctx, strct), T_pjlvalue) : nullptr,
+                jl_field_isptr(sty, idx0), align);
         }
     }
     else {
