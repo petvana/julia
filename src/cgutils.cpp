@@ -53,6 +53,22 @@ static Value *mark_callee_rooted(jl_codectx_t &ctx, Value *V)
         PointerType::get(T_jlvalue, AddressSpace::CalleeRooted));
 }
 
+AtomicOrdering get_llvm_atomic_order(enum jl_memory_order order)
+{
+    switch (order) {
+    case jl_memory_order_notatomic: return AtomicOrdering::NotAtomic;
+    case jl_memory_order_unordered: return AtomicOrdering::Unordered;
+    case jl_memory_order_monotonic: return AtomicOrdering::Monotonic;
+    case jl_memory_order_acquire:   return AtomicOrdering::Acquire;
+    case jl_memory_order_release:   return AtomicOrdering::Release;
+    case jl_memory_order_acq_rel:   return AtomicOrdering::AcquireRelease;
+    case jl_memory_order_seq_cst:   return AtomicOrdering::SequentiallyConsistent;
+    default:
+        assert("invalid atomic ordering");
+        abort();
+    }
+}
+
 // --- language feature checks ---
 
 #define JL_FEAT_TEST(ctx, feature) ((ctx).params->feature)
@@ -1024,24 +1040,24 @@ static Value *emit_datatype_name(jl_codectx_t &ctx, Value *dt)
 // the error is always thrown. This may cause non dominated use
 // of SSA value error in the verifier.
 
-static void just_emit_error(jl_codectx_t &ctx, const std::string &txt)
+static void just_emit_error(jl_codectx_t &ctx, StringRef txt)
 {
     ctx.builder.CreateCall(prepare_call(jlerror_func), stringConstPtr(ctx.emission_context, ctx.builder, txt));
 }
 
-static void emit_error(jl_codectx_t &ctx, const std::string &txt)
+static void emit_error(jl_codectx_t &ctx, StringRef txt)
 {
     just_emit_error(ctx, txt);
     ctx.builder.CreateUnreachable();
-    BasicBlock *cont = BasicBlock::Create(jl_LLVMContext,"after_error",ctx.f);
+    BasicBlock *cont = BasicBlock::Create(jl_LLVMContext, "after_error", ctx.f);
     ctx.builder.SetInsertPoint(cont);
 }
 
 // DO NOT PASS IN A CONST CONDITION!
-static void error_unless(jl_codectx_t &ctx, Value *cond, const std::string &msg)
+static void error_unless(jl_codectx_t &ctx, Value *cond, StringRef msg)
 {
-    BasicBlock *failBB = BasicBlock::Create(jl_LLVMContext,"fail",ctx.f);
-    BasicBlock *passBB = BasicBlock::Create(jl_LLVMContext,"pass");
+    BasicBlock *failBB = BasicBlock::Create(jl_LLVMContext, "fail", ctx.f);
+    BasicBlock *passBB = BasicBlock::Create(jl_LLVMContext, "pass");
     ctx.builder.CreateCondBr(cond, passBB, failBB);
     ctx.builder.SetInsertPoint(failBB);
     just_emit_error(ctx, msg);
@@ -1605,11 +1621,12 @@ static void emit_memcpy(jl_codectx_t &ctx, Value *dst, MDNode *tbaa_dst, const j
 
 static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &strct,
                                          unsigned idx, jl_datatype_t *jt,
-                                         Value **nullcheck = nullptr);
+                                         enum jl_memory_order order, Value **nullcheck=nullptr);
 
 static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
         jl_cgval_t *ret, jl_cgval_t strct,
-        Value *idx, jl_datatype_t *stt, jl_value_t *inbounds)
+        Value *idx, jl_datatype_t *stt, jl_value_t *inbounds,
+        enum jl_memory_order order)
 {
     size_t nfields = jl_datatype_nfields(stt);
     bool maybe_null = (unsigned)stt->ninitialized != nfields;
@@ -1623,7 +1640,7 @@ static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
     }
     if (nfields == 1) {
         (void)idx0();
-        *ret = emit_getfield_knownidx(ctx, strct, 0, stt);
+        *ret = emit_getfield_knownidx(ctx, strct, 0, stt, order);
         return true;
     }
     assert(!jl_is_vecelement_type((jl_value_t*)stt));
@@ -1681,7 +1698,8 @@ static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
         }
     }
 
-    if (strct.ispointer()) { // boxed or stack
+    bool maybeatomic = stt->name->atomicfields != NULL;
+    if (strct.ispointer() && !maybeatomic) { // boxed or stack
         if (is_datatype_all_pointers(stt)) {
             size_t minimum_field_size = std::numeric_limits<size_t>::max();
             size_t minimum_align = JL_HEAP_ALIGNMENT;
@@ -1736,13 +1754,30 @@ static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
     return false;
 }
 
+static void emit_atomic_error(jl_codectx_t &ctx, StringRef msg)
+{
+    emit_error(ctx, msg);
+}
+
 // If `nullcheck` is not NULL and a pointer NULL check is necessary
 // store the pointer to be checked in `*nullcheck` instead of checking it
 static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &strct,
                                          unsigned idx, jl_datatype_t *jt,
-                                         Value **nullcheck)
+                                         enum jl_memory_order order, Value **nullcheck)
 {
     jl_value_t *jfty = jl_field_type(jt, idx);
+    bool isatomic = jl_field_isatomic(jt, idx);
+    bool needlock = isatomic && jl_field_size(jt, idx) > MAX_ATOMIC_SIZE;
+    if (!isatomic && order == jl_memory_order_unspecified)
+        order = jl_memory_order_notatomic;
+    if (!isatomic && order != jl_memory_order_notatomic && order != jl_memory_order_unspecified) {
+        emit_atomic_error(ctx, "getfield non-atomic field cannot be accessed atomically");
+        return jl_cgval_t(); // unreachable
+    }
+    if (isatomic && order == jl_memory_order_notatomic) {
+        emit_atomic_error(ctx, "getfield atomic field cannot be accessed non-atomically");
+        return jl_cgval_t(); // unreachable
+    }
     if (jfty == jl_bottom_type) {
         raise_exception(ctx, literal_pointer_val(ctx, jl_undefref_exception));
         return jl_cgval_t(); // unreachable
@@ -1784,7 +1819,7 @@ static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &st
         }
         if (jl_field_isptr(jt, idx)) {
             LoadInst *Load = ctx.builder.CreateAlignedLoad(T_prjlvalue, maybe_bitcast(ctx, addr, T_pprjlvalue), Align(sizeof(void*)));
-            Load->setOrdering(AtomicOrdering::Unordered);
+            Load->setOrdering(order <= jl_memory_order_unordered ? AtomicOrdering::Unordered : get_llvm_atomic_order(order));
             maybe_mark_load_dereferenceable(Load, maybe_null, jl_field_type(jt, idx));
             Value *fldv = tbaa_decorate(tbaa, Load);
             if (maybe_null)
@@ -1825,7 +1860,11 @@ static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &st
             return mark_julia_slot(addr, jfty, NULL, tbaa);
         }
         unsigned align = jl_field_align(jt, idx);
-        return typed_load(ctx, addr, NULL, jfty, tbaa, nullptr, maybe_null, align, nullcheck);
+        order = needlock ? jl_memory_order_notatomic : order;
+        // if (needlock) emit_lock
+        jl_cgval_t ret = typed_load(ctx, addr, NULL, jfty, tbaa, nullptr, maybe_null, align, nullcheck);
+        // if (needlock) emit_unlock
+        return ret;
     }
     else if (isa<UndefValue>(strct.V)) {
         return jl_cgval_t();
@@ -2818,7 +2857,7 @@ static void emit_write_multibarrier(jl_codectx_t &ctx, Value *parent, Value *agg
 
 static void emit_setfield(jl_codectx_t &ctx,
         jl_datatype_t *sty, const jl_cgval_t &strct, size_t idx0,
-        const jl_cgval_t &rhs, bool checked, bool wb)
+        const jl_cgval_t &rhs, bool checked, bool wb, enum jl_memory_order order)
 {
     if (sty->mutabl || !checked) {
         assert(strct.ispointer());
@@ -2833,10 +2872,11 @@ static void emit_setfield(jl_codectx_t &ctx,
         jl_value_t *jfty = jl_svecref(sty->types, idx0);
         if (jl_field_isptr(sty, idx0)) {
             Value *r = boxed(ctx, rhs); // don't need a temporary gcroot since it'll be rooted by strct
-            cast<StoreInst>(tbaa_decorate(strct.tbaa, ctx.builder.CreateAlignedStore(r,
+            StoreInst *store = ctx.builder.CreateAlignedStore(r,
                         emit_bitcast(ctx, addr, T_pprjlvalue),
-                        Align(sizeof(jl_value_t*)))))
-                    ->setOrdering(AtomicOrdering::Unordered);
+                        Align(sizeof(jl_value_t*)));
+            tbaa_decorate(strct.tbaa, store);
+            store->setOrdering(order <= jl_memory_order_unordered ? AtomicOrdering::Unordered : get_llvm_atomic_order(order));
             if (wb && strct.isboxed && !type_is_permalloc(rhs.typ))
                 emit_write_barrier(ctx, boxed(ctx, strct), r);
         }
@@ -3045,7 +3085,7 @@ static jl_cgval_t emit_new_struct(jl_codectx_t &ctx, jl_value_t *ty, size_t narg
             else
                 need_wb = false;
             emit_typecheck(ctx, rhs, jl_svecref(sty->types, i), "new");
-            emit_setfield(ctx, sty, strctinfo, i, rhs, false, need_wb);
+            emit_setfield(ctx, sty, strctinfo, i, rhs, false, need_wb, jl_memory_order_notatomic);
         }
         return strctinfo;
     }

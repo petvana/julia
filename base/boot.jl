@@ -281,6 +281,9 @@ struct UndefRefError       <: Exception end
 struct UndefVarError <: Exception
     var::Symbol
 end
+struct ConcurrencyViolationError <: Exception
+    msg::AbstractString
+end
 struct InterruptException <: Exception end
 struct DomainError <: Exception
     val

@@ -2284,33 +2284,6 @@ static jl_cgval_t emit_globalref(jl_codectx_t &ctx, jl_module_t *mod, jl_sym_t *
     return emit_checked_var(ctx, bp, name, false, tbaa_binding);
 }
 
-static jl_cgval_t emit_getfield(jl_codectx_t &ctx, const jl_cgval_t &strct, jl_sym_t *name)
-{
-    if (strct.constant && jl_is_module(strct.constant))
-        return emit_globalref(ctx, (jl_module_t*)strct.constant, name);
-
-    jl_datatype_t *sty = (jl_datatype_t*)strct.typ;
-    if (jl_is_type_type((jl_value_t*)sty) && jl_is_concrete_type(jl_tparam0(sty)))
-        sty = (jl_datatype_t*)jl_typeof(jl_tparam0(sty));
-    sty = (jl_datatype_t*)jl_unwrap_unionall((jl_value_t*)sty);
-    if (jl_is_structtype(sty) && sty != jl_module_type && sty->layout) {
-        unsigned idx = jl_field_index(sty, name, 0);
-        if (idx != (unsigned)-1) {
-            return emit_getfield_knownidx(ctx, strct, idx, sty);
-        }
-    }
-    // TODO: attempt better codegen for approximate types, if the types
-    // and offsets of some fields are independent of parameters.
-
-    // TODO: generic getfield func with more efficient calling convention
-    jl_cgval_t myargs_array[2] = {
-        strct,
-        mark_julia_const((jl_value_t*)name)
-    };
-    Value *result = emit_jlcall(ctx, jlgetfield_func, V_rnull, myargs_array, 2, JLCALL_F_CC);
-    return mark_julia_type(ctx, result, true, jl_any_type);
-}
-
 template<typename Func>
 static Value *emit_guarded_test(jl_codectx_t &ctx, Value *ifnot, bool defval, Func &&func)
 {
@@ -2498,8 +2471,8 @@ static Value *emit_bits_compare(jl_codectx_t &ctx, jl_cgval_t arg1, jl_cgval_t a
                     continue;
                 Value *nullcheck1 = nullptr;
                 Value *nullcheck2 = nullptr;
-                auto fld1 = emit_getfield_knownidx(ctx, arg1, i, sty, &nullcheck1);
-                auto fld2 = emit_getfield_knownidx(ctx, arg2, i, sty, &nullcheck2);
+                auto fld1 = emit_getfield_knownidx(ctx, arg1, i, sty, jl_memory_order_notatomic, &nullcheck1);
+                auto fld2 = emit_getfield_knownidx(ctx, arg2, i, sty, jl_memory_order_notatomic, &nullcheck2);
                 answer = ctx.builder.CreateAnd(answer, emit_f_is(ctx, fld1, fld2,
                                                                  nullcheck1, nullcheck2));
             }
@@ -2769,6 +2742,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                     ety = (jl_value_t*)jl_any_type;
                 ssize_t nd = jl_is_long(ndp) ? jl_unbox_long(ndp) : -1;
                 jl_value_t *boundscheck = argv[1].constant;
+                emit_typecheck(ctx, argv[1], (jl_value_t*)jl_bool_type, "arrayref");
                 Value *idx = emit_array_nd_index(ctx, ary, ary_ex, nd, &argv[3], nargs - 2, boundscheck);
                 if (!isboxed && jl_is_datatype(ety) && jl_datatype_size(ety) == 0) {
                     assert(((jl_datatype_t*)ety)->instance != NULL);
@@ -2834,6 +2808,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                     jl_value_t *ary_ex = jl_exprarg(ex, 2);
                     ssize_t nd = jl_is_long(ndp) ? jl_unbox_long(ndp) : -1;
                     jl_value_t *boundscheck = argv[1].constant;
+                    emit_typecheck(ctx, argv[1], (jl_value_t*)jl_bool_type, "arrayset");
                     Value *idx = emit_array_nd_index(ctx, ary, ary_ex, nd, &argv[4], nargs - 3, boundscheck);
                     if (!isboxed && jl_is_datatype(ety) && jl_datatype_size(ety) == 0) {
                         // no-op
@@ -2914,15 +2889,58 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
         }
     }
 
-    else if (f == jl_builtin_getfield && (nargs == 2 || nargs == 3)) {
+    else if (f == jl_builtin_getfield && (nargs == 2 || nargs == 3 || nargs == 4)) {
         const jl_cgval_t &obj = argv[1];
         const jl_cgval_t &fld = argv[2];
-        if (fld.constant && fld.typ == (jl_value_t*)jl_symbol_type) {
-            *ret = emit_getfield(ctx, argv[1], (jl_sym_t*)fld.constant);
+        enum jl_memory_order order = jl_memory_order_unspecified;
+        jl_value_t *boundscheck = jl_true;
+
+        if (nargs == 4) {
+            const jl_cgval_t &ord = argv[3];
+            const jl_cgval_t &inb = argv[4];
+            emit_typecheck(ctx, ord, (jl_value_t*)jl_symbol_type, "getfield");
+            emit_typecheck(ctx, inb, (jl_value_t*)jl_bool_type, "getfield");
+            if (!ord.constant)
+                return false;
+            order = jl_get_atomic_order((jl_sym_t*)ord.constant);
+            if (inb.constant == jl_false)
+                boundscheck = jl_false;
+        }
+        else if (nargs == 3) {
+            const jl_cgval_t &arg3 = argv[3];
+            if (arg3.typ == (jl_value_t*)jl_symbol_type && arg3.constant)
+                order = jl_get_atomic_order((jl_sym_t*)arg3.constant);
+            else if (arg3.constant == jl_false)
+                boundscheck = jl_false;
+            else if (arg3.typ != (jl_value_t*)jl_bool_type)
+                return false;
+        }
+        if (order == jl_memory_order_invalid) {
+            emit_atomic_error(ctx, "invalid atomic ordering");
+            *ret = jl_cgval_t(); // unreachable
             return true;
         }
 
-        if (fld.typ == (jl_value_t*)jl_long_type) {
+        jl_datatype_t *utt = (jl_datatype_t*)jl_unwrap_unionall(obj.typ);
+        if (jl_is_type_type((jl_value_t*)utt) && jl_is_concrete_type(jl_tparam0(utt)))
+            utt = (jl_datatype_t*)jl_typeof(jl_tparam0(utt));
+
+        if (fld.constant && fld.typ == (jl_value_t*)jl_symbol_type) {
+            jl_sym_t *name = (jl_sym_t*)fld.constant;
+            if (obj.constant && jl_is_module(obj.constant)) {
+                *ret = emit_globalref(ctx, (jl_module_t*)obj.constant, name);
+                return true;
+            }
+
+            if (jl_is_datatype(utt) && utt->layout) {
+                ssize_t idx = jl_field_index(utt, name, 0);
+                if (idx != -1) {
+                    *ret = emit_getfield_knownidx(ctx, obj, idx, utt, order);
+                    return true;
+                }
+            }
+        }
+        else if (fld.typ == (jl_value_t*)jl_long_type) {
             if (ctx.vaSlot > 0) {
                 // optimize VA tuple
                 if (LoadInst *load = dyn_cast_or_null<LoadInst>(obj.V)) {
@@ -2932,7 +2950,6 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                                 ctx.builder.CreateInBoundsGEP(T_prjlvalue, ctx.argArray, ConstantInt::get(T_size, ctx.nReqArgs)),
                                 NULL, false, NULL, NULL);
                         Value *idx = emit_unbox(ctx, T_size, fld, (jl_value_t*)jl_long_type);
-                        jl_value_t *boundscheck = (nargs == 3 ? argv[3].constant : jl_true);
                         idx = emit_bounds_check(ctx, va_ary, NULL, idx, valen, boundscheck);
                         idx = ctx.builder.CreateAdd(idx, ConstantInt::get(T_size, ctx.nReqArgs));
                         Instruction *v = ctx.builder.CreateAlignedLoad(T_prjlvalue, ctx.builder.CreateInBoundsGEP(ctx.argArray, idx), Align(sizeof(void*)));
@@ -2944,29 +2961,25 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                 }
             }
 
-            jl_datatype_t *utt = (jl_datatype_t*)jl_unwrap_unionall(obj.typ);
-            if (jl_is_datatype(utt) && utt->layout) {
-                if ((jl_is_structtype(utt) || jl_is_tuple_type(utt)) && !jl_subtype((jl_value_t*)jl_module_type, obj.typ)) {
+            if (jl_is_datatype(utt)) {
+                if (jl_is_structtype(utt) && utt->layout) {
                     size_t nfields = jl_datatype_nfields(utt);
                     // integer index
                     size_t idx;
                     if (fld.constant && (idx = jl_unbox_long(fld.constant) - 1) < nfields) {
                         // known index
-                        *ret = emit_getfield_knownidx(ctx, obj, idx, utt);
+                        *ret = emit_getfield_knownidx(ctx, obj, idx, utt, order);
                         return true;
                     }
                     else {
                         // unknown index
                         Value *vidx = emit_unbox(ctx, T_size, fld, (jl_value_t*)jl_long_type);
-                        jl_value_t *boundscheck = (nargs == 3 ? argv[3].constant : jl_true);
-                        if (emit_getfield_unknownidx(ctx, ret, obj, vidx, utt, boundscheck)) {
+                        if (emit_getfield_unknownidx(ctx, ret, obj, vidx, utt, boundscheck, order)) {
                             return true;
                         }
                     }
                 }
-            }
-            else {
-                if (jl_is_tuple_type(utt) && is_tupletype_homogeneous(utt->types, true)) {
+                if (jl_is_tuple_type(utt) && is_tupletype_homogeneous(utt->parameters, true)) {
                     // For tuples, we can emit code even if we don't know the exact
                     // type (e.g. because we don't know the length). This is possible
                     // as long as we know that all elements are of the same (leaf) type.
@@ -2978,7 +2991,6 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                         Value *vidx = emit_unbox(ctx, T_size, fld, (jl_value_t*)jl_long_type);
                         // This is not necessary for correctness, but allows to omit
                         // the extra code for getting the length of the tuple
-                        jl_value_t *boundscheck = (nargs == 3 ? argv[3].constant : jl_true);
                         if (!bounds_check_enabled(ctx, boundscheck)) {
                             vidx = ctx.builder.CreateSub(vidx, ConstantInt::get(T_size, 1));
                         } else {
@@ -2996,16 +3008,37 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                 }
             }
         }
+        // TODO: attempt better codegen for approximate types, if the types
+        // and offsets of some fields are independent of parameters.
+
+        // TODO: generic getfield func with more efficient calling convention
+        jl_cgval_t myargs_array[2] = { obj, fld, };
+        Value *result = emit_jlcall(ctx, jlgetfield_func, V_rnull, myargs_array, 2, JLCALL_F_CC);
+        *ret = mark_julia_type(ctx, result, true, jl_any_type);
+        return true;
     }
 
-    else if (f == jl_builtin_setfield && nargs == 3) {
+    else if (f == jl_builtin_setfield && (nargs == 3 || nargs == 4)) {
         const jl_cgval_t &obj = argv[1];
         const jl_cgval_t &fld = argv[2];
         const jl_cgval_t &val = argv[3];
+        enum jl_memory_order order = jl_memory_order_notatomic;
+        if (nargs == 4) {
+            const jl_cgval_t &ord = argv[3];
+            emit_typecheck(ctx, ord, (jl_value_t*)jl_symbol_type, "setfield!");
+            if (!ord.constant)
+                return false;
+            order = jl_get_atomic_order((jl_sym_t*)ord.constant);
+        }
+        if (order == jl_memory_order_invalid) {
+            emit_atomic_error(ctx, "invalid atomic ordering");
+            *ret = jl_cgval_t(); // unreachable
+            return true;
+        }
 
         jl_datatype_t *uty = (jl_datatype_t*)jl_unwrap_unionall(obj.typ);
-        if (jl_is_structtype(uty) && uty != jl_module_type && uty->layout) {
-            size_t idx = (size_t)-1;
+        if (jl_is_structtype(uty) && uty->layout) {
+            ssize_t idx = -1;
             if (fld.constant && fld.typ == (jl_value_t*)jl_symbol_type) {
                 idx = jl_field_index(uty, (jl_sym_t*)fld.constant, 0);
             }
@@ -3014,11 +3047,22 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                 if (i > 0 && i <= jl_datatype_nfields(uty))
                     idx = i - 1;
             }
-            if (idx != (size_t)-1) {
+            if (idx != -1) {
                 jl_value_t *ft = jl_svecref(uty->types, idx);
                 if (jl_subtype(val.typ, ft)) {
                     // TODO: attempt better codegen for approximate types
-                    emit_setfield(ctx, uty, obj, idx, val, true, true);
+                    bool isatomic = jl_field_isatomic(uty, idx);
+                    bool needlock = isatomic && jl_field_size(uty, idx) > MAX_ATOMIC_SIZE;
+                    if (isatomic == (order == jl_memory_order_notatomic)) {
+                        emit_atomic_error(ctx,
+                                isatomic ? "setfield! atomic field cannot be written non-atomically"
+                                         : "setfield! non-atomic field cannot be written atomically");
+                        *ret = jl_cgval_t();
+                        return true;
+                    }
+                    // if (needlock) emit_lock
+                    emit_setfield(ctx, uty, obj, idx, val, true, true, needlock ? jl_memory_order_notatomic : order);
+                    // if (needlock) emit_unlock
                     *ret = val;
                     return true;
                 }
@@ -3070,6 +3114,8 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                 Value *types_len = emit_datatype_nfields(ctx, tyv);
                 Value *idx = emit_unbox(ctx, T_size, fld, (jl_value_t*)jl_long_type);
                 jl_value_t *boundscheck = (nargs == 3 ? argv[3].constant : jl_true);
+                if (nargs == 3)
+                    emit_typecheck(ctx, argv[3], (jl_value_t*)jl_bool_type, "fieldtype");
                 emit_bounds_check(ctx, typ, (jl_value_t*)jl_datatype_type, idx, types_len, boundscheck);
                 Value *fieldtyp_p = ctx.builder.CreateInBoundsGEP(T_prjlvalue, decay_derived(ctx, emit_bitcast(ctx, types_svec, T_pprjlvalue)), idx);
                 Value *fieldtyp = tbaa_decorate(tbaa_const, ctx.builder.CreateAlignedLoad(T_prjlvalue, fieldtyp_p, Align(sizeof(void*))));
@@ -3143,6 +3189,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
     else if (f == jl_builtin_isdefined && nargs == 2) {
         const jl_cgval_t &obj = argv[1];
         const jl_cgval_t &fld = argv[2];
+        // TODO (jwn): handle memory ordering (nargs == 3)
         jl_datatype_t *stt = (jl_datatype_t*)obj.typ;
         if (jl_is_type_type((jl_value_t*)stt)) {
             // the representation type of Type{T} is either typeof(T), or unknown

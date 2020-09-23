@@ -756,7 +756,7 @@ JL_CALLABLE(jl_f_tuple)
     jl_ptls_t ptls = jl_get_ptls_states();
     jl_value_t *jv = jl_gc_alloc(ptls, jl_datatype_size(tt), tt);
     for (i = 0; i < nargs; i++)
-        set_nth_field(tt, (void*)jv, i, args[i]);
+        set_nth_field(tt, jv, i, args[i], 0);
     return jv;
 }
 
@@ -774,10 +774,14 @@ JL_CALLABLE(jl_f_svec)
 
 // struct operations ------------------------------------------------------------
 
-enum jl_memory_order jl_check_atomic_order(jl_sym_t *order)
+enum jl_memory_order jl_get_atomic_order(jl_sym_t *order)
 {
-    if (order == unordered_sym || order == monotonic_sym)
-        return jl_memory_order_relaxed;
+    if (order == none_sym)
+        return jl_memory_order_notatomic;
+    if (order == unordered_sym)
+        return jl_memory_order_unordered;
+    if (order == monotonic_sym)
+        return jl_memory_order_monotonic;
     if (order == acquire_sym)
         return jl_memory_order_acquire;
     if (order == release_sym)
@@ -786,23 +790,31 @@ enum jl_memory_order jl_check_atomic_order(jl_sym_t *order)
         return jl_memory_order_acq_rel;
     if (order == sequentially_consistent_sym)
         return jl_memory_order_seq_cst;
-    jl_error("invalid atomic ordering");
+    return jl_memory_order_invalid;
+}
+
+enum jl_memory_order jl_check_atomic_order(jl_sym_t *order)
+{
+    enum jl_memory_order mo = jl_get_atomic_order(order);
+    if (mo < 0)
+        jl_atomic_error("invalid atomic ordering");
+    return mo;
 }
 
 
 JL_CALLABLE(jl_f_getfield)
 {
-    jl_sym_t *order = NULL;
+    enum jl_memory_order order = jl_memory_order_unspecified;
     if (nargs == 4) {
         JL_TYPECHK(getfield, symbol, args[3]);
         JL_TYPECHK(getfield, bool, args[4]);
         nargs -= 2;
-        order = (jl_sym_t*)args[3];
+        order = jl_check_atomic_order((jl_sym_t*)args[3]);
     }
     else if (nargs == 3) {
         if (!jl_is_bool(args[2])) {
             JL_TYPECHK(getfield, symbol, args[2]);
-            order = (jl_sym_t*)args[2];
+            order = jl_check_atomic_order((jl_sym_t*)args[2]);
         }
         nargs -= 1;
     }
@@ -814,8 +826,7 @@ JL_CALLABLE(jl_f_getfield)
         v = jl_eval_global_var((jl_module_t*)v, (jl_sym_t*)args[1]);
     }
     else {
-        if (!jl_is_datatype(vt))
-            jl_type_error("getfield", (jl_value_t*)jl_datatype_type, v);
+        assert(jl_is_datatype(vt));
         jl_datatype_t *st = (jl_datatype_t*)vt;
         size_t idx;
         if (jl_is_long(args[1])) {
@@ -828,22 +839,25 @@ JL_CALLABLE(jl_f_getfield)
             jl_sym_t *fld = (jl_sym_t*)args[1];
             idx = jl_field_index(st, fld, 1);
         }
+        int isatomic = jl_field_isatomic(st, idx);
+        if (!isatomic && order != jl_memory_order_notatomic && order != jl_memory_order_unspecified)
+            jl_atomic_error("getfield non-atomic field cannot be accessed atomically");
+        if (isatomic && order == jl_memory_order_notatomic)
+            jl_atomic_error("getfield atomic field cannot be accessed non-atomically");
         v = jl_get_nth_field_checked(v, idx);
     }
-    if (order) {
-        if (jl_check_atomic_order(order) >= jl_memory_order_acq_rel)
-            jl_fence();
-    }
+    if (order >= jl_memory_order_acq_rel || order == jl_memory_order_acquire)
+        jl_fence(); // `v` already had at least consume ordering
     return v;
 }
 
 JL_CALLABLE(jl_f_setfield)
 {
-    jl_sym_t *order = NULL;
+    enum jl_memory_order order = jl_memory_order_notatomic;
     if (nargs == 4) {
         JL_TYPECHK(getfield, symbol, args[3]);
         nargs -= 1;
-        order = (jl_sym_t*)args[3];
+        order = jl_check_atomic_order((jl_sym_t*)args[3]);
     }
     JL_NARGS(setfield!, 3, 3);
     jl_value_t *v = args[0];
@@ -867,11 +881,13 @@ JL_CALLABLE(jl_f_setfield)
     if (!jl_isa(args[2], ft)) {
         jl_type_error("setfield!", ft, args[2]);
     }
-    if (order) {
-        if (jl_check_atomic_order(order) >= jl_memory_order_relaxed)
-            jl_fence();
-    }
-    set_nth_field(st, (void*)v, idx, args[2]);
+    int isatomic = !!jl_field_isatomic(st, idx);
+    if (isatomic == (order == jl_memory_order_notatomic))
+        jl_atomic_error(isatomic ? "setfield! atomic field cannot be written non-atomically"
+                                 : "setfield! non-atomic field cannot be written atomically");
+    if (order >= jl_memory_order_acq_rel || order == jl_memory_order_release)
+        jl_fence(); // `st->[idx]` will be have at least relaxed ordering
+    set_nth_field(st, v, idx, args[2], isatomic);
     return args[2];
 }
 
@@ -974,10 +990,10 @@ JL_CALLABLE(jl_f_isdefined)
     jl_module_t *m = NULL;
     jl_sym_t *s = NULL;
     JL_NARGS(isdefined, 2, 3);
-    jl_sym_t *order = NULL;
+    enum jl_memory_order order = jl_memory_order_notatomic;
     if (nargs == 3) {
         JL_TYPECHK(isdefined, symbol, args[2]);
-        order = (jl_sym_t*)args[2];
+        order = jl_check_atomic_order((jl_sym_t*)args[2]);
     }
     if (jl_is_module(args[0])) {
         JL_TYPECHK(isdefined, symbol, args[1]);
@@ -999,11 +1015,10 @@ JL_CALLABLE(jl_f_isdefined)
         if ((int)idx == -1)
             return jl_false;
     }
-    if (order) {
-        if (jl_check_atomic_order(order) >= jl_memory_order_relaxed)
-            jl_fence();
-    }
-    return jl_field_isdefined(args[0], idx) ? jl_true : jl_false;
+    jl_value_t *v = jl_field_isdefined(args[0], idx) ? jl_true : jl_false;
+    if (order >= jl_memory_order_acq_rel || order == jl_memory_order_acquire)
+        jl_fence(); // `v` already had at least consume ordering
+    return v;
 }
 
 

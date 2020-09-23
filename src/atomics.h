@@ -21,7 +21,11 @@
 #include <signal.h>
 
 enum jl_memory_order {
-    jl_memory_order_relaxed,
+    jl_memory_order_unspecified = -2,
+    jl_memory_order_invalid = -1,
+    jl_memory_order_notatomic = 0,
+    jl_memory_order_unordered,
+    jl_memory_order_monotonic,
     jl_memory_order_consume,
     jl_memory_order_acquire,
     jl_memory_order_release,

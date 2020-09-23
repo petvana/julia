@@ -66,7 +66,7 @@ static void *const _tags[] = {
          &jl_methoderror_type, &jl_loaderror_type, &jl_initerror_type,
          &jl_undefvarerror_type, &jl_stackovf_exception, &jl_diverror_exception,
          &jl_interrupt_exception, &jl_boundserror_type, &jl_memory_exception,
-         &jl_undefref_exception, &jl_readonlymemory_exception,
+         &jl_undefref_exception, &jl_readonlymemory_exception, &jl_atomicerror_type,
 #ifdef SEGV_EXCEPTION
          &jl_segv_exception,
 #endif

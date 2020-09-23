@@ -451,7 +451,7 @@ void jl_compute_field_offsets(jl_datatype_t *st)
             jl_value_t *fld = jl_field_type(st, i);
             int isatomic = jl_field_isatomic(st, i);
             size_t fsz = 0, al = 1;
-            if (jl_islayout_inline(fld, &fsz, &al)) { // aka jl_datatype_isinlinealloc
+            if (jl_islayout_inline(fld, &fsz, &al) && (!isatomic || jl_is_datatype(fld))) { // aka jl_datatype_isinlinealloc
                 if (__unlikely(fsz > max_size))
                     // Should never happen
                     throw_ovf(should_malloc, desc, st, fsz);
@@ -489,13 +489,13 @@ void jl_compute_field_offsets(jl_datatype_t *st)
                     haspadding = 1;
                 }
             }
-            if (isatomic && fsz > 16)
+            if (isatomic && fsz > MAX_ATOMIC_SIZE)
                 needlock = 1;
-            if (isatomic && fsz <= 16)
+            if (isatomic && fsz <= MAX_ATOMIC_SIZE)
                 al = fsz;
             if (al != 0) {
                 size_t alsz = LLT_ALIGN(sz, al);
-                if (isatomic && fsz <= 16)
+                if (isatomic && fsz <= MAX_ATOMIC_SIZE)
                     alsz = next_power_of_two(alsz);
                 if (alsz != sz)
                     haspadding = 1;
@@ -509,6 +509,15 @@ void jl_compute_field_offsets(jl_datatype_t *st)
             if (__unlikely(max_offset - sz < fsz))
                 throw_ovf(should_malloc, desc, st, sz);
             sz += fsz;
+        }
+        if (needlock) {
+            size_t offset = LLT_ALIGN(sizeof(jl_mutex_t), alignm);
+            for (i = 0; i < nfields; i++) {
+                desc[i].offset += offset;
+            }
+            if (__unlikely(max_offset - sz < offset))
+                throw_ovf(should_malloc, desc, st, sz);
+            sz += offset;
         }
         if (homogeneous && jl_is_tuple_type(st)) {
             // Some tuples become LLVM vectors with stronger alignment than what was calculated above.
@@ -943,20 +952,14 @@ JL_DLLEXPORT jl_value_t *jl_new_struct(jl_datatype_t *type, ...)
     size_t nf = jl_datatype_nfields(type);
     va_start(args, type);
     jl_value_t *jv = jl_gc_alloc(ptls, jl_datatype_size(type), type);
+    if (nf > 0 && jl_field_offset(type, 0) != 0) {
+        memset(jv, 0, jl_field_offset(type, 0));
+    }
     for (size_t i = 0; i < nf; i++) {
-        set_nth_field(type, (void*)jv, i, va_arg(args, jl_value_t*));
+        set_nth_field(type, jv, i, va_arg(args, jl_value_t*), 0);
     }
     va_end(args);
     return jv;
-}
-
-static void init_struct_tail(jl_datatype_t *type, jl_value_t *jv, size_t na)
-{
-    if (na < jl_datatype_nfields(type)) {
-        char *data = (char*)jl_data_ptr(jv);
-        size_t offs = jl_field_offset(type, na);
-        memset(data + offs, 0, jl_datatype_size(type) - offs);
-    }
 }
 
 JL_DLLEXPORT jl_value_t *jl_new_structv(jl_datatype_t *type, jl_value_t **args, uint32_t na)
@@ -974,12 +977,21 @@ JL_DLLEXPORT jl_value_t *jl_new_structv(jl_datatype_t *type, jl_value_t **args, 
     if (type->instance != NULL)
         return type->instance;
     jl_value_t *jv = jl_gc_alloc(ptls, jl_datatype_size(type), type);
-    JL_GC_PUSH1(&jv);
-    for (size_t i = 0; i < na; i++) {
-        set_nth_field(type, (void*)jv, i, args[i]);
+    if (jl_datatype_nfields(type) > 0) {
+        if (jl_field_offset(type, 0) != 0) {
+            memset(jl_data_ptr(jv), 0, jl_field_offset(type, 0));
+        }
+        JL_GC_PUSH1(&jv);
+        for (size_t i = 0; i < na; i++) {
+            set_nth_field(type, jv, i, args[i], 0);
+        }
+        if (na < jl_datatype_nfields(type)) {
+            char *data = (char*)jl_data_ptr(jv);
+            size_t offs = jl_field_offset(type, na);
+            memset(data + offs, 0, jl_datatype_size(type) - offs);
+        }
+        JL_GC_POP();
     }
-    init_struct_tail(type, jv, na);
-    JL_GC_POP();
     return jv;
 }
 
@@ -1006,6 +1018,8 @@ JL_DLLEXPORT jl_value_t *jl_new_structt(jl_datatype_t *type, jl_value_t *tup)
     }
     size_t size = jl_datatype_size(type);
     jl_value_t *jv = jl_gc_alloc(ptls, size, type);
+    if (nf == 0)
+        return jv;
     jl_value_t *fi = NULL;
     JL_GC_PUSH2(&jv, &fi);
     if (type->zeroinit) {
@@ -1014,12 +1028,15 @@ JL_DLLEXPORT jl_value_t *jl_new_structt(jl_datatype_t *type, jl_value_t *tup)
         // which can allocate.
         memset(jl_data_ptr(jv), 0, size);
     }
+    else if (jl_field_offset(type, 0) != 0) {
+        memset(jl_data_ptr(jv), 0, jl_field_offset(type, 0));
+    }
     for (size_t i = 0; i < nargs; i++) {
         jl_value_t *ft = jl_field_type_concrete(type, i);
         fi = jl_get_nth_field(tup, i);
         if (!jl_isa(fi, ft))
             jl_type_error("new", ft, fi);
-        set_nth_field(type, (void*)jv, i, fi);
+        set_nth_field(type, jv, i, fi, 0);
     }
     JL_GC_POP();
     return jv;
@@ -1037,6 +1054,16 @@ JL_DLLEXPORT jl_value_t *jl_new_struct_uninit(jl_datatype_t *type)
 }
 
 // field access ---------------------------------------------------------------
+
+static void jl_lock_value(jl_value_t *v)
+{
+    JL_LOCK_NOGC((jl_mutex_t*)v);
+}
+
+static void jl_unlock_value(jl_value_t *v)
+{
+    JL_UNLOCK_NOGC((jl_mutex_t*)v);
+}
 
 JL_DLLEXPORT int jl_field_index(jl_datatype_t *t, jl_sym_t *fld, int err)
 {
@@ -1143,7 +1170,7 @@ static inline void memassign_safe(int hasptr, jl_value_t *parent, char *dst, con
     }
 }
 
-void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOTSAFEPOINT
+void set_nth_field(jl_datatype_t *st, jl_value_t *v, size_t i, jl_value_t *rhs, int isatomic) JL_NOTSAFEPOINT
 {
     size_t offs = jl_field_offset(st, i);
     if (rhs == NULL) { // TODO: this should be invalid, but it happens frequently in ircode.c
@@ -1175,7 +1202,12 @@ void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOT
             // should be safe enough to read fsz bytes from rhs
             // due to gc alignment considerations
         }
+        int islocked = (isatomic && fsz > MAX_ATOMIC_SIZE);
+        if (islocked)
+            jl_lock_value(v);
         memassign_safe(hasptr, v, (char*)v + offs, rhs, fsz);
+        if (islocked)
+            jl_unlock_value(v);
     }
 }
 

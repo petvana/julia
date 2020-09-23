@@ -491,7 +491,7 @@ jl_value_t *jl_wrap_vararg(jl_value_t *t, jl_value_t *n);
 void jl_reinstantiate_inner_types(jl_datatype_t *t);
 jl_datatype_t *jl_lookup_cache_type_(jl_datatype_t *type);
 void jl_cache_type_(jl_datatype_t *type);
-void set_nth_field(jl_datatype_t *st, void *v, size_t i, jl_value_t *rhs) JL_NOTSAFEPOINT;
+void set_nth_field(jl_datatype_t *st, jl_value_t *v, size_t i, jl_value_t *rhs, int isatomic) JL_NOTSAFEPOINT;
 jl_expr_t *jl_exprn(jl_sym_t *head, size_t n);
 jl_function_t *jl_new_generic_function(jl_sym_t *name, jl_module_t *module);
 jl_function_t *jl_new_generic_function_with_supertype(jl_sym_t *name, jl_module_t *module, jl_datatype_t *st);
@@ -1295,6 +1295,7 @@ extern jl_sym_t *acquire_sym;
 extern jl_sym_t *release_sym;
 extern jl_sym_t *acquire_release_sym;
 extern jl_sym_t *sequentially_consistent_sym; // or strong_sym?
+enum jl_memory_order jl_get_atomic_order(jl_sym_t *order);
 
 struct _jl_sysimg_fptrs_t;
 
