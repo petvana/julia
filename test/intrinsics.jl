@@ -116,9 +116,9 @@ let r = Ref{Int}(10)
         @test Core.Intrinsics.atomics_pointerref(p, :seq_cst) === 10
         @test Core.Intrinsics.atomics_pointerset(p, 1, :seq_cst) === p
         @test Core.Intrinsics.atomics_pointerref(p, :seq_cst) === 1
-        @test Core.Intrinsics.atomics_pointercmpxchg(p, 100, 1, :seq_cst) === true
+        @test Core.Intrinsics.atomics_pointercmpxchg(p, 100, 1, :seq_cst, :seq_cst) === true
         @test Core.Intrinsics.atomics_pointerref(p, :seq_cst) === 100
-        @test Core.Intrinsics.atomics_pointercmpxchg(p, 1, 1, :seq_cst) === false
+        @test Core.Intrinsics.atomics_pointercmpxchg(p, 1, 1, :seq_cst, :seq_cst) === false
         @test Core.Intrinsics.atomics_pointerref(p, :seq_cst) === 100
         @test Core.Intrinsics.atomics_pointerop(p, 1, +, :seq_cst) == 100
         @test Core.Intrinsics.atomics_pointerop(p, 1, +, :seq_cst) == 101
