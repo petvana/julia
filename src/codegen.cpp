@@ -451,6 +451,12 @@ static const auto jlerror_func = new JuliaFunction{
             {T_pint8}, false); },
     get_attrs_noreturn,
 };
+static const auto jlatomicerror_func = new JuliaFunction{
+    "jl_atomic_error",
+    [](LLVMContext &C) { return FunctionType::get(T_void,
+            {T_pint8}, false); },
+    get_attrs_noreturn,
+};
 static const auto jltypeerror_func = new JuliaFunction{
     "jl_type_error",
     [](LLVMContext &C) { return FunctionType::get(T_void,
@@ -3054,7 +3060,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
         const jl_cgval_t &val = argv[3];
         enum jl_memory_order order = jl_memory_order_notatomic;
         if (nargs == 4) {
-            const jl_cgval_t &ord = argv[3];
+            const jl_cgval_t &ord = argv[4];
             emit_typecheck(ctx, ord, (jl_value_t*)jl_symbol_type, "setfield!");
             if (!ord.constant)
                 return false;
@@ -7604,6 +7610,7 @@ static void init_jit_functions(void)
     add_named_global("__stack_chk_fail", &__stack_chk_fail);
     add_named_global(jltls_states_func, (void*)NULL);
     add_named_global(jlerror_func, &jl_error);
+    add_named_global(jlatomicerror_func, &jl_atomic_error);
     add_named_global(jlthrow_func, &jl_throw);
     add_named_global(jlundefvarerror_func, &jl_undefined_var_error);
     add_named_global(jlboundserrorv_func, &jl_bounds_error_ints);

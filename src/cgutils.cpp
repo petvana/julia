@@ -1040,17 +1040,22 @@ static Value *emit_datatype_name(jl_codectx_t &ctx, Value *dt)
 // the error is always thrown. This may cause non dominated use
 // of SSA value error in the verifier.
 
-static void just_emit_error(jl_codectx_t &ctx, StringRef txt)
+static void just_emit_error(jl_codectx_t &ctx, Function *F, StringRef txt)
 {
-    ctx.builder.CreateCall(prepare_call(jlerror_func), stringConstPtr(ctx.emission_context, ctx.builder, txt));
+    ctx.builder.CreateCall(F, stringConstPtr(ctx.emission_context, ctx.builder, txt));
+}
+
+static void emit_error(jl_codectx_t &ctx, Function *F, StringRef txt)
+{
+    just_emit_error(ctx, F, txt);
+    ctx.builder.CreateUnreachable();
+    BasicBlock *cont = BasicBlock::Create(jl_LLVMContext, "after_error", ctx.f);
+    ctx.builder.SetInsertPoint(cont);
 }
 
 static void emit_error(jl_codectx_t &ctx, StringRef txt)
 {
-    just_emit_error(ctx, txt);
-    ctx.builder.CreateUnreachable();
-    BasicBlock *cont = BasicBlock::Create(jl_LLVMContext, "after_error", ctx.f);
-    ctx.builder.SetInsertPoint(cont);
+    emit_error(ctx, prepare_call(jlerror_func), txt);
 }
 
 // DO NOT PASS IN A CONST CONDITION!
@@ -1060,7 +1065,7 @@ static void error_unless(jl_codectx_t &ctx, Value *cond, StringRef msg)
     BasicBlock *passBB = BasicBlock::Create(jl_LLVMContext, "pass");
     ctx.builder.CreateCondBr(cond, passBB, failBB);
     ctx.builder.SetInsertPoint(failBB);
-    just_emit_error(ctx, msg);
+    just_emit_error(ctx, prepare_call(jlerror_func), msg);
     ctx.builder.CreateUnreachable();
     ctx.f->getBasicBlockList().push_back(passBB);
     ctx.builder.SetInsertPoint(passBB);
@@ -1616,7 +1621,7 @@ static void emit_memcpy(jl_codectx_t &ctx, Value *dst, MDNode *tbaa_dst, const j
 
 static void emit_atomic_error(jl_codectx_t &ctx, StringRef msg)
 {
-    emit_error(ctx, msg); // TODO: emit correct error type
+    emit_error(ctx, prepare_call(jlatomicerror_func), msg);
 }
 
 static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &strct,
@@ -1775,8 +1780,6 @@ static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &st
     jl_value_t *jfty = jl_field_type(jt, idx);
     bool isatomic = jl_field_isatomic(jt, idx);
     bool needlock = isatomic && jl_field_size(jt, idx) > MAX_ATOMIC_SIZE;
-    if (!isatomic && order == jl_memory_order_unspecified)
-        order = jl_memory_order_notatomic;
     if (!isatomic && order != jl_memory_order_notatomic && order != jl_memory_order_unspecified) {
         emit_atomic_error(ctx, "getfield non-atomic field cannot be accessed atomically");
         return jl_cgval_t(); // unreachable
@@ -1826,7 +1829,7 @@ static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &st
         }
         if (jl_field_isptr(jt, idx)) {
             LoadInst *Load = ctx.builder.CreateAlignedLoad(T_prjlvalue, maybe_bitcast(ctx, addr, T_pprjlvalue), Align(sizeof(void*)));
-            Load->setOrdering(order <= jl_memory_order_unordered ? AtomicOrdering::Unordered : get_llvm_atomic_order(order));
+            Load->setOrdering(order <= jl_memory_order_notatomic ? AtomicOrdering::Unordered : get_llvm_atomic_order(order));
             maybe_mark_load_dereferenceable(Load, maybe_null, jl_field_type(jt, idx));
             Value *fldv = tbaa_decorate(tbaa, Load);
             if (maybe_null)
@@ -1870,7 +1873,7 @@ static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &st
         if (needlock)
             emit_lockstate_value(ctx, strct, true);
         jl_cgval_t ret = typed_load(ctx, addr, NULL, jfty, tbaa, nullptr, false,
-                needlock ? AtomicOrdering::NotAtomic : get_llvm_atomic_order(order), // TODO: we should use unordered for anything with CountTrackedPointers(elty).count > 0
+                needlock || order <= jl_memory_order_notatomic ? AtomicOrdering::NotAtomic : get_llvm_atomic_order(order), // TODO: we should use unordered for anything with CountTrackedPointers(elty).count > 0
                 maybe_null, align, nullcheck);
         if (needlock)
             emit_lockstate_value(ctx, strct, false);

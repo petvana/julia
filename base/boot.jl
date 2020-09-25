@@ -187,7 +187,7 @@ export
     InterruptException, InexactError, OutOfMemoryError, ReadOnlyMemoryError,
     OverflowError, StackOverflowError, SegmentationFault, UndefRefError, UndefVarError,
     TypeError, ArgumentError, MethodError, AssertionError, LoadError, InitError,
-    UndefKeywordError,
+    UndefKeywordError, ConcurrencyViolationError,
     # AST representation
     Expr, QuoteNode, LineNumberNode, GlobalRef,
     # object model functions

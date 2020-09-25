@@ -518,6 +518,7 @@ void jl_compute_field_offsets(jl_datatype_t *st)
             if (__unlikely(max_offset - sz < offset))
                 throw_ovf(should_malloc, desc, st, sz);
             sz += offset;
+            haspadding = 1;
         }
         if (homogeneous && jl_is_tuple_type(st)) {
             // Some tuples become LLVM vectors with stronger alignment than what was calculated above.
