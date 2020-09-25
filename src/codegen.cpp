@@ -565,6 +565,24 @@ static const auto jlgenericfunction_func = new JuliaFunction{
                 {T_pjlvalue, T_pjlvalue, T_pprjlvalue, T_pjlvalue, T_pjlvalue}, false); },
     nullptr,
 };
+static const auto jllockvalue_func = new JuliaFunction{
+    "jl_lock_value",
+    [](LLVMContext &C) { return FunctionType::get(T_void,
+            {PointerType::get(T_jlvalue, AddressSpace::CalleeRooted)}, false); },
+    [](LLVMContext &C) { return AttributeList::get(C,
+            AttributeSet(),
+            AttributeSet(),
+            {Attributes(C, {Attribute::NoCapture})}); },
+};
+static const auto jlunlockvalue_func = new JuliaFunction{
+    "jl_unlock_value",
+    [](LLVMContext &C) { return FunctionType::get(T_void,
+            {PointerType::get(T_jlvalue, AddressSpace::CalleeRooted)}, false); },
+    [](LLVMContext &C) { return AttributeList::get(C,
+            AttributeSet(),
+            AttributeSet(),
+            {Attributes(C, {Attribute::NoCapture})}); },
+};
 static const auto jlenter_func = new JuliaFunction{
     "jl_enter_handler",
     [](LLVMContext &C) { return FunctionType::get(T_void,
@@ -2779,7 +2797,8 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                             idx, ety,
                             isboxed ? tbaa_ptrarraybuf : tbaa_arraybuf,
                             aliasscope,
-                            isboxed);
+                            isboxed,
+                            AtomicOrdering::NotAtomic);
                 }
                 return true;
             }
@@ -2881,8 +2900,11 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                                         emit_arrayptr(ctx, ary, ary_ex, isboxed),
                                         idx, val, ety,
                                         isboxed ? tbaa_ptrarraybuf : tbaa_arraybuf,
-                                        ctx.aliasscope, data_owner,
-                                        isboxed, 0);
+                                        ctx.aliasscope,
+                                        data_owner,
+                                        isboxed,
+                                        isboxed ? AtomicOrdering::Unordered : AtomicOrdering::NotAtomic, // TODO: we should do this for anything with CountTrackedPointers(elty).count > 0
+                                        0);
                         }
                     }
                     *ret = ary;
@@ -2987,6 +3009,11 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                     // type (e.g. because we don't know the length). This is possible
                     // as long as we know that all elements are of the same (leaf) type.
                     if (obj.ispointer()) {
+                        if (order != jl_memory_order_notatomic && order != jl_memory_order_unspecified) {
+                            emit_atomic_error(ctx, "getfield non-atomic field cannot be accessed atomically");
+                            *ret = jl_cgval_t(); // unreachable
+                            return true;
+                        }
                         // Determine which was the type that was homogenous
                         jl_value_t *jt = jl_tparam0(utt);
                         if (jl_is_vararg_type(jt))
@@ -3005,7 +3032,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                         Value *ptr = maybe_decay_tracked(ctx, data_pointer(ctx, obj));
                         *ret = typed_load(ctx, ptr, vidx,
                                 isboxed ? (jl_value_t*)jl_any_type : jt,
-                                obj.tbaa, nullptr, isboxed, false);
+                                obj.tbaa, nullptr, isboxed, AtomicOrdering::NotAtomic, false);
                         return true;
                     }
                 }
@@ -3054,6 +3081,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                 jl_value_t *ft = jl_svecref(uty->types, idx);
                 if (jl_subtype(val.typ, ft)) {
                     // TODO: attempt better codegen for approximate types
+                    bool isboxed = jl_field_isptr(uty, idx);
                     bool isatomic = jl_field_isatomic(uty, idx);
                     bool needlock = isatomic && jl_field_size(uty, idx) > MAX_ATOMIC_SIZE;
                     if (isatomic == (order == jl_memory_order_notatomic)) {
@@ -3063,9 +3091,14 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                         *ret = jl_cgval_t();
                         return true;
                     }
-                    // if (needlock) emit_lock
-                    emit_setfield(ctx, uty, obj, idx, val, true, true, needlock ? jl_memory_order_notatomic : order);
-                    // if (needlock) emit_unlock
+                    if (needlock)
+                        emit_lockstate_value(ctx, obj, true);
+                    emit_setfield(ctx, uty, obj, idx, val, true, true,
+                            (needlock || order <= jl_memory_order_notatomic)
+                            ? (isboxed ? AtomicOrdering::Unordered : AtomicOrdering::NotAtomic) // TODO: we should do this for anything with CountTrackedPointers(elty).count > 0
+                            : get_llvm_atomic_order(order));
+                    if (needlock)
+                        emit_lockstate_value(ctx, obj, false);
                     *ret = val;
                     return true;
                 }

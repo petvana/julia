@@ -648,7 +648,7 @@ JL_DLLEXPORT jl_datatype_t *jl_new_datatype(
                     if (!mutabl)
                         jl_errorf("invalid field attribute atomic for immutable struct");
                     if (atomicfields == NULL) {
-                        size_t nb = LLT_ALIGN(jl_svec_len(fnames), 32) * sizeof(uint32_t);
+                        size_t nb = (jl_svec_len(fnames) + 31) / 32 * sizeof(uint32_t);
                         atomicfields = (uint32_t*)malloc_s(nb);
                         memset(atomicfields, 0, nb);
                     }
@@ -1055,12 +1055,12 @@ JL_DLLEXPORT jl_value_t *jl_new_struct_uninit(jl_datatype_t *type)
 
 // field access ---------------------------------------------------------------
 
-static void jl_lock_value(jl_value_t *v)
+JL_DLLEXPORT void jl_lock_value(jl_value_t *v)
 {
     JL_LOCK_NOGC((jl_mutex_t*)v);
 }
 
-static void jl_unlock_value(jl_value_t *v)
+JL_DLLEXPORT void jl_unlock_value(jl_value_t *v)
 {
     JL_UNLOCK_NOGC((jl_mutex_t*)v);
 }

@@ -631,7 +631,7 @@ static Type *_julia_struct_to_llvm(jl_codegen_params_t *ctx, jl_value_t *jt, jl_
             }
             if (jst->layout) {
                 assert(isptr == jl_field_isptr(jst, i));
-                assert(isptr ? sizeof(void*) : fsz + jl_is_uniontype(ty) == jl_field_size(jst, i));
+                assert((isptr ? sizeof(void*) : fsz + jl_is_uniontype(ty)) == jl_field_size(jst, i));
             }
             Type *lty;
             if (isptr) {
@@ -1417,7 +1417,7 @@ Value *extract_first_ptr(jl_codectx_t &ctx, Value *V)
 // If `nullcheck` is not NULL and a pointer NULL check is necessary
 // store the pointer to be checked in `*nullcheck` instead of checking it
 static jl_cgval_t typed_load(jl_codectx_t &ctx, Value *ptr, Value *idx_0based, jl_value_t *jltype,
-                             MDNode *tbaa, MDNode *aliasscope, bool isboxed,
+                             MDNode *tbaa, MDNode *aliasscope, bool isboxed, AtomicOrdering Order,
                              bool maybe_null_if_boxed = true, unsigned alignment = 0,
                              Value **nullcheck = nullptr)
 {
@@ -1443,12 +1443,11 @@ static jl_cgval_t typed_load(jl_codectx_t &ctx, Value *ptr, Value *idx_0based, j
         else if (!alignment)
             alignment = julia_alignment(jltype);
         load = ctx.builder.CreateAlignedLoad(data, Align(alignment), false);
+        cast<LoadInst>(load)->setOrdering(Order);
         if (aliasscope)
             load->setMetadata("alias.scope", aliasscope);
-        if (isboxed) {
-            cast<LoadInst>(load)->setOrdering(AtomicOrdering::Unordered);
+        if (isboxed)
             load = maybe_mark_load_dereferenceable(load, true, jltype);
-        }
         if (tbaa)
             load = tbaa_decorate(tbaa, load);
         if (maybe_null_if_boxed) {
@@ -1471,7 +1470,7 @@ static void typed_store(jl_codectx_t &ctx,
         Value *ptr, Value *idx_0based, const jl_cgval_t &rhs,
         jl_value_t *jltype, MDNode *tbaa, MDNode *aliasscope,
         Value *parent,  // for the write barrier, NULL if no barrier needed
-        bool isboxed, unsigned alignment = 0)
+        bool isboxed, AtomicOrdering Order, unsigned alignment = 0)
 {
     Type *elty = isboxed ? T_prjlvalue : julia_type_to_llvm(ctx, jltype);
     if (type_is_ghost(elty))
@@ -1491,8 +1490,7 @@ static void typed_store(jl_codectx_t &ctx,
     else if (!alignment)
         alignment = julia_alignment(jltype);
     StoreInst *store = ctx.builder.CreateAlignedStore(r, ptr, Align(alignment));
-    if (isboxed) // TODO: we should do this for anything with CountTrackedPointers(elty).count > 0
-        store->setOrdering(AtomicOrdering::Unordered);
+    store->setOrdering(Order);
     if (aliasscope)
         store->setMetadata("noalias", aliasscope);
     if (tbaa)
@@ -1616,6 +1614,10 @@ static void emit_memcpy(jl_codectx_t &ctx, Value *dst, MDNode *tbaa_dst, const j
 }
 
 
+static void emit_atomic_error(jl_codectx_t &ctx, StringRef msg)
+{
+    emit_error(ctx, msg); // TODO: emit correct error type
+}
 
 static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &strct,
                                          unsigned idx, jl_datatype_t *jt,
@@ -1698,6 +1700,11 @@ static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
 
     bool maybeatomic = stt->name->atomicfields != NULL;
     if (strct.ispointer() && !maybeatomic) { // boxed or stack
+        if (order != jl_memory_order_notatomic && order != jl_memory_order_unspecified) {
+            emit_atomic_error(ctx, "getfield non-atomic field cannot be accessed atomically");
+            *ret = jl_cgval_t(); // unreachable
+            return true;
+        }
         if (is_datatype_all_pointers(stt)) {
             size_t minimum_field_size = std::numeric_limits<size_t>::max();
             size_t minimum_align = JL_HEAP_ALIGNMENT;
@@ -1739,7 +1746,7 @@ static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
                 *ret = mark_julia_slot(addr, jft, NULL, strct.tbaa);
                 return true;
             }
-            *ret = typed_load(ctx, ptr, idx, jft, strct.tbaa, nullptr, false, maybe_null);
+            *ret = typed_load(ctx, ptr, idx, jft, strct.tbaa, nullptr, false, AtomicOrdering::NotAtomic, maybe_null);
             return true;
         }
         else if (strct.isboxed) {
@@ -1752,9 +1759,11 @@ static bool emit_getfield_unknownidx(jl_codectx_t &ctx,
     return false;
 }
 
-static void emit_atomic_error(jl_codectx_t &ctx, StringRef msg)
+static void emit_lockstate_value(jl_codectx_t &ctx, const jl_cgval_t &strct, bool newstate)
 {
-    emit_error(ctx, msg);
+    assert(strct.isboxed);
+    Value *v = mark_callee_rooted(ctx, boxed(ctx, strct));
+    ctx.builder.CreateCall(prepare_call(newstate ? jllockvalue_func : jlunlockvalue_func), v);
 }
 
 // If `nullcheck` is not NULL and a pointer NULL check is necessary
@@ -1858,10 +1867,13 @@ static jl_cgval_t emit_getfield_knownidx(jl_codectx_t &ctx, const jl_cgval_t &st
             return mark_julia_slot(addr, jfty, NULL, tbaa);
         }
         unsigned align = jl_field_align(jt, idx);
-        order = needlock ? jl_memory_order_notatomic : order;
-        // if (needlock) emit_lock
-        jl_cgval_t ret = typed_load(ctx, addr, NULL, jfty, tbaa, nullptr, false, maybe_null, align, nullcheck);
-        // if (needlock) emit_unlock
+        if (needlock)
+            emit_lockstate_value(ctx, strct, true);
+        jl_cgval_t ret = typed_load(ctx, addr, NULL, jfty, tbaa, nullptr, false,
+                needlock ? AtomicOrdering::NotAtomic : get_llvm_atomic_order(order), // TODO: we should use unordered for anything with CountTrackedPointers(elty).count > 0
+                maybe_null, align, nullcheck);
+        if (needlock)
+            emit_lockstate_value(ctx, strct, false);
         return ret;
     }
     else if (isa<UndefValue>(strct.V)) {
@@ -2855,7 +2867,7 @@ static void emit_write_multibarrier(jl_codectx_t &ctx, Value *parent, Value *agg
 
 static void emit_setfield(jl_codectx_t &ctx,
         jl_datatype_t *sty, const jl_cgval_t &strct, size_t idx0,
-        const jl_cgval_t &rhs, bool checked, bool wb, enum jl_memory_order order)
+        const jl_cgval_t &rhs, bool checked, bool wb, AtomicOrdering Order)
 {
     if (sty->mutabl || !checked) {
         assert(strct.ispointer());
@@ -2885,10 +2897,10 @@ static void emit_setfield(jl_codectx_t &ctx,
         }
         else {
             unsigned align = jl_field_align(sty, idx0);
-            order <= jl_memory_order_unordered ? AtomicOrdering::Unordered : get_llvm_atomic_order(order);
+            bool isboxed = jl_field_isptr(sty, idx0);
             typed_store(ctx, addr, NULL, rhs, jfty, strct.tbaa, nullptr,
                 wb ? maybe_bitcast(ctx, data_pointer(ctx, strct), T_pjlvalue) : nullptr,
-                jl_field_isptr(sty, idx0), align);
+                isboxed, Order, align);
         }
     }
     else {
@@ -3074,7 +3086,7 @@ static jl_cgval_t emit_new_struct(jl_codectx_t &ctx, jl_value_t *ty, size_t narg
             else
                 need_wb = false;
             emit_typecheck(ctx, rhs, jl_svecref(sty->types, i), "new");
-            emit_setfield(ctx, sty, strctinfo, i, rhs, false, need_wb, jl_memory_order_notatomic);
+            emit_setfield(ctx, sty, strctinfo, i, rhs, false, need_wb, AtomicOrdering::NotAtomic);
         }
         return strctinfo;
     }

@@ -1420,6 +1420,10 @@ static int equiv_type(jl_value_t *ta, jl_value_t *tb)
           dta->mutabl == dtb->mutabl &&
           (jl_svec_len(jl_field_names(dta)) != 0 || dta->size == dtb->size) &&
           dta->ninitialized == dtb->ninitialized &&
+          (dta->name->atomicfields == NULL
+           ? dtb->name->atomicfields == NULL
+           : (dtb->name->atomicfields != NULL &&
+              memcmp(dta->name->atomicfields, dtb->name->atomicfields, (jl_svec_len(dta->name->names) + 31) / 32 * sizeof(uint32_t)) == 0)) &&
           jl_egal((jl_value_t*)jl_field_names(dta), (jl_value_t*)jl_field_names(dtb)) &&
           jl_nparams(dta) == jl_nparams(dtb)))
         return 0;
