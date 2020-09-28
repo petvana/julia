@@ -483,6 +483,7 @@ function get_test_result(ex, source)
             $testret
         catch _e
             _e isa InterruptException && rethrow()
+            Base.display_error(Base.catch_stack())
             Threw(_e, Base.catch_stack(), $(QuoteNode(source)))
         end
     end
